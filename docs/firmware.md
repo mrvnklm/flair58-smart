@@ -78,6 +78,6 @@ With `friendly_name: Flair 58`, entity IDs come out as `switch.flair_58_power`, 
 |---|---|
 | Clicks counted in an own ISR (`button_clicks.h`) | ESPHome's GPIO sensor keeps only the latest level and evaluates it in the main loop. Every kettle HTTP request blocks that loop for 150–470 ms, so presses and gaps inside such a window got lost. Measured fast taps: presses 29–62 ms, gaps 48–73 ms |
 | HTTP never runs while a press is held | a blocked loop would stretch a 50 ms preset press into a 1300 ms on/off press |
-| `power_save_mode: none` | with light sleep each request waited for the next beacon: 100–640 ms instead of ~0.1 s |
+| `power_save_mode: none` | a kettle request from the ESP took 100–640 ms with light sleep, 150–470 ms without |
 | Kettle poll backs off to 10 s when unreachable | each failed request blocks the loop up to the 1 s timeout |
 | Melodies in chunks of 3 tones | one request per note is too slow; the kettle's `buz` takes 9 values = 3 tones played back to back |

@@ -23,7 +23,7 @@ substitutions:
   pin_button: GPIO10         # -> MOSFET gate / module TRIG. High = MOSFET conducts = S1 pressed
   pin_button_read_num: "6"   # <- 100 kΩ <- S1 leg on U2 pin 4. Below 100 kΩ an unpowered ESP may look like a press (README)
   # "true" while the read wire is NOT installed: the internal pull-up keeps the open pin at "released"
-  # (a floating pin produces phantom clicks, and one click while off switches the Flair on).
+  # (a floating pin can produce phantom clicks, and one click while off switches the Flair on).
   # Set "false" once the 100 kΩ read wire is in: the pull-up would then mask real presses.
   pin_button_read_pullup: "true"
   pin_led_1: GPIO4           # LED left   = LOW

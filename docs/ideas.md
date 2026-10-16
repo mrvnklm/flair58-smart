@@ -19,13 +19,12 @@ Reports from other machines and kettles are welcome as issues.
 
 ## Backlog
 
-| Idea | Rough effort |
-|---|---|
-| Ready chime: kettle plays a tone when Flair **and** kettle are ready | ~20 min |
-| Shot counter and heat-up time sensors | ~20 min |
-| Find the kettle IP automatically (DHCP name, network scan, or the Wi-Fi MAC readable over BLE) | ~45 min |
-| Morning preheat at a set time in the firmware (no HA needed) | ~30 min |
-| BLE kettle path for firmware 1.2.26: status on B1, commands on B6, through the ESP's own BLE | a few evenings |
+- Ready chime: the kettle plays a tone when Flair **and** kettle are ready
+- Shot counter and heat-up time sensors
+- Find the kettle IP automatically (DHCP name, network scan, or the Wi-Fi MAC readable over BLE)
+- Morning preheat at a set time in the firmware (no HA needed)
+- BLE kettle path for firmware 1.2.26: status on B1, commands on B6, through the ESP's own BLE
+- Antenna outside the housing (reference build: −69…−73 dBm inside)
 
 ## Head temperature
 

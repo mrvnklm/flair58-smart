@@ -7,7 +7,7 @@ Photos: [front](../photos/board-front.jpg) · [back](../photos/board-back.jpg)
 
 ## Overview
 
-- The machine runs from an external 24 V power supply (stock: 24 V / 5 A). There is no mains voltage inside.
+- The machine runs from an external 24 V power supply. There is no mains voltage inside.
 - One small PCB in the lower housing. Front: push button S1 and three green LEDs. Back: everything else.
 - A 6-wire harness connects it to the brew head.
 
@@ -28,10 +28,10 @@ Photos: [front](../photos/board-front.jpg) · [back](../photos/board-back.jpg)
 | Q5 | SOT-23 | *probable:* gate driver for Q6 |
 | Buzzer | round SMD | ready beep |
 | R6, R11, C4 | next to the NTC pads | *probable:* NTC divider and filter |
-| CON2 | unpopulated 5-pin header `5V PA1 PA6 PA0 GND` | factory programming header (see below) |
+| CON2 | unpopulated 5-pin header `5V PA1 PA6 PA0 GND` | *probable:* factory programming header (see below) |
 
 From the [Frankenflair 58](https://something.fromnothing.blog/posts/frankenflair/) build, not re-measured here:
-NTC 100 kΩ at room temperature, sitting in the silicone heater pad; heater ≈ 7 Ω cold, ≈ 82 W at 24 V.
+NTC 100 kΩ at room temperature, sitting in the silicone heater pad; heater ≈ 7 Ω cold, ≈ 82 W at 24 V; stock PSU 24 V / 5 A.
 
 ## Signals
 
@@ -63,8 +63,8 @@ Minimum lengths were not searched further.
 The LED lights while the power-on press is still held. A short press sent at that moment merged into the long press
 and was lost.
 
-2.2 V is below the ESP32's guaranteed digital high (~2.5 V); ADC1 pins with a threshold around 1 V read it reliably.
-ADC2 does not work while Wi-Fi is on.
+2.2 V is below the ESP32's guaranteed digital high (~2.5 V), so the firmware reads the LEDs on ADC1 pins with a
+1.2 V on / 0.6 V off hysteresis. ADC2 does not work while Wi-Fi is on.
 
 ## NTC observations
 
@@ -85,5 +85,5 @@ A passive tap therefore did not work in this build. Ideas for an own head sensor
 | CON2 as UART or control header | PA0/PA1/PA6 read 0 V in standby and running. None is connected to S1 (16–32 MΩ). Pulling each high through 1 kΩ did nothing. *Probable* match with the ISP pins of an FT61F022A (PA1 = ISPDAT, PA0 = ISPCLK, not checked by continuity). Reflashing U2 would need FMD's programmer and a full replacement firmware |
 | Powering the ESP from CON2 `5V` | that is the 7550 LDO (~100 mA), fed straight from 24 V |
 | Continuity beeper on the MCU pins | the meter current back-powers U2 through its clamp diodes; the Flair's buzzer chirps on every pin. The Ω range gives usable readings |
-| Driving S1 directly from a GPIO | first attempt drove the line inverted (idle low = button held) and the machine reacted to the edges. Open-drain works, but the GPIO then sees the Flair's 5 V pull-up, and an unpowered ESP pulled the line low (phantom press at power-up). Hence the MOSFET |
+| Driving S1 directly from a GPIO | first attempt drove the line inverted (idle low = button held) and the machine reacted to the edges. Open-drain works, but the GPIO then sees the Flair's 5 V pull-up, and an unpowered ESP can pull the line low through its clamp diodes, which the Flair may take as a press (the direct-drive firmware had a cold-boot guard for it). Hence the MOSFET |
 | ESP and Flair on separate supplies | with one side powered and the other not, the signal wires back-fed and disturbed the Flair |

@@ -3,12 +3,12 @@
 The **EKG Pro** has Wi-Fi and BLE (an ESP32 inside). The older **EKG+** is BLE-only with a different protocol and is
 not covered here.
 
-## Firmware decides everything
+## Firmware versions
 
-| Firmware | Local HTTP CLI over Wi-Fi | On/off | Verdict |
+| Firmware | Local HTTP CLI over Wi-Fi | On/off | With this project |
 |---|---|---|---|
-| 1.1.75SSP / 1.1.76SSP | full: state and commands | Wi-Fi | best for local control; what `kettle_wifi.yaml` needs |
-| 1.2.24 | muted | none reliable | avoid |
+| 1.1.75SSP / 1.1.76SSP | full: state and commands | Wi-Fi | `kettle_wifi.yaml` (tested on 1.1.75SSP) |
+| 1.2.24 | muted | none reliable | no local control found |
 | 1.2.26 | muted, native HTTP partly | **BLE only**; Wi-Fi pauses while heating | needs a BLE path (not built, see [ideas.md](ideas.md)) |
 
 Fellow's changelog: <https://help.fellowproducts.com/hc/en-us/articles/9593179929115>
@@ -67,7 +67,7 @@ Tested through an [ESPHome Bluetooth proxy](https://esphome.io/components/blueto
 | B6 console | accepts CLI text writes without a reply. `setstate S_Heat` / `S_Off` switch the kettle within ~2 s |
 | Proxy pitfall | the ESPHome proxy drops every GATT connection as soon as its advertisement subscriber unsubscribes. Keep the subscription open |
 
-So on 1.1.x, BLE can send commands but not report state; Wi-Fi is the better path. On 1.2.26 BLE is the only
+So on 1.1.x, BLE can send commands but not report state, while Wi-Fi does both. On 1.2.26 BLE is the only
 path, with status on B1 and commands on B6 according to the integration sources (not verified here).
 
 ## Security

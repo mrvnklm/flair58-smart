@@ -7,7 +7,7 @@ switch one off and both go off.
 The original Flair firmware stays in charge of heating. The ESP presses the button and reads the three status LEDs;
 it does not touch the heater or the temperature sensor.
 
-> Unofficial, not affiliated with Flair Espresso or Fellow. Opening the machine voids its warranty. This repo
+> Unofficial, not affiliated with Flair Espresso or Fellow. Opening the machine may void its warranty. This repo
 > documents what was measured and built on one machine and is provided as is, without any warranty.
 
 **Contents:** [Features](#features) · [Status](#status) · [How it works](#how-it-works) ·
@@ -40,7 +40,7 @@ revisions and kettle firmware versions included: [docs/ideas.md](docs/ideas.md#o
 
 ```
                      ┌──────────────────────────────┐
- 24 V PSU ──┬───────▶│ Flair board                   │── heater (Q6, high side)
+ 24 V PSU ──┬───────▶│ Flair board                   │── heater
             │        │ U2 = stock MCU and firmware   │── NTC (not tapped)
             │        └───┬──────────────┬───────────┘
             │   S1 leg on U2 pin 4      │ LED anodes (~2.2 V lit)
@@ -70,21 +70,21 @@ Measured on board HL-01-V2.2 (2024-08-14). Details and component list: [docs/har
 
 | Topic | Finding |
 |---|---|
-| Supply | external 24 V PSU, no mains inside. 5 V logic from a 7550-type LDO (~100 mA) |
+| Supply | external 24 V PSU, no mains inside. A 7550-type LDO (100 mA class) makes 5 V on the board |
 | Button S1 | active-low on U2 pin 4: idles at 5 V, pressed = 0 V. A short press while off is ignored by the Flair |
-| LEDs | cathodes on GND, anode ≈ 2.2 V when lit. Below a guaranteed ESP32 digital high, so read via ADC1 |
+| LEDs | cathode on GND, anode just under 2.2 V when lit. Below a guaranteed ESP32 digital high, so read via ADC1 |
 | LED logic | heating = preset LED blinks (~1 s), ready = solid bar (LOW: 1, MEDIUM: 2, HIGH: 3 LEDs). Power-on starts on LOW |
 | NTC | pulsed by U2, very high impedance. An ESP pin on it (even through 3 kΩ) made the LEDs flicker; a loose wire on the pad changed the reading when touched |
-| CON2 header | factory programming header (`5V PA1 PA6 PA0 GND`), no UART, no control path |
+| CON2 header | `5V PA1 PA6 PA0 GND`: no UART signal, no control path; most likely the factory programming header |
 
 ### Design choices in this build
 
 | Choice | Reason |
 |---|---|
 | LEDs instead of the NTC | the NTC tap disturbed the Flair's own temperature reading |
-| MOSFET instead of a direct GPIO | a direct GPIO sees the Flair's 5 V pull-up, and an unpowered ESP pulled the line low through its clamp diodes (phantom press at power-up) |
+| MOSFET instead of a direct GPIO | a direct GPIO sees the Flair's 5 V pull-up, and an unpowered ESP can pull the line low through its clamp diodes, which the Flair may take as a press |
 | One common supply (buck from 24 V) | ESP powered while the Flair was not (or the other way round) back-fed through the signal wires and disturbed the Flair |
-| No switch in the Flair's GND | a low-side cut breaks the common ground and back-feeds through the signal wires. A hard power cut would go in the +24 V line |
+| No hard power cut built | if one is added: in the +24 V line. A cut in the Flair's GND would break the common ground the signal wires rely on |
 | Not from CON2 `5V` | that is the small LDO, not enough for an ESP32 with Wi-Fi |
 
 ## Parts
@@ -93,17 +93,17 @@ Measured on board HL-01-V2.2 (2024-08-14). Details and component list: [docs/har
 
 | Part | Notes |
 |---|---|
-| ESP32-C3 board, ideally with external antenna | reference: DIYMall ESP32-C3 MINI V1. A C3 SuperMini fits too; its PCB antenna is weak. Needs 3 free ADC1 pins |
+| ESP32-C3 board | reference: DIYMall ESP32-C3 MINI V1 (external antenna). The smaller C3 SuperMini is untested here. Needs 3 free ADC1 pins |
 | MOSFET for the button | reference: D4184 module. Smaller alternative: 2N7002 or BSS138 with 100 kΩ gate → GND (untested here) |
 | 5 V supply for the ESP | a USB power supply (what the reference build uses today) or a buck from the Flair's 24 V (parts below) |
-| Thin wire (26–28 AWG), heat-shrink, Kapton tape | thin wire fits through the housing; Kapton insulates the ESP and MOSFET where they sit on or near the board. Silicone insulation is flexible and does not melt back when soldering |
+| Wire, heat-shrink, insulating tape | for the connections inside the housing |
 
 ### Optional
 
 | Part | For |
 |---|---|
 | 100 kΩ resistor | real-button read: one click while off = on, click counting for the kettle melody |
-| 3 × 10 kΩ resistors | protection in the LED lines against a slip of the soldering iron (untested here) |
+| 3 × 10 kΩ resistors | series resistors in the LED lines: planned for the reference build, not fitted yet |
 | Buck 24 V → 5 V, ≥ 30 V input rating | ESP powered from the Flair's 24 V, one common supply. Pololu D24V5F5 (5.1–36 V) or Traco TSR 0.5-2450 (6.5–32 V); Mini-360 is rated 23 V max, MP1584 28 V |
 | + electrolytic ≥ 33 µF / ≥ 50 V | with the buck: at its input, against plug-in spikes |
 | + polyfuse 250–500 mA, V_max ≥ 30 V | with the buck: in the 24 V tap. Many 1206 polyfuses are rated 6–16 V only |
@@ -122,8 +122,8 @@ Board photos: [The board in short](#the-board-in-short).
 | MOSFET source (module VIN−) | Flair GND |
 | MOSFET drain (module VOUT−) | S1 leg on U2 pin 4 |
 
-GPIO high = MOSFET conducts = pressed. An unpowered ESP leaves the MOSFET off. If nothing switches: TRIG and GND on
-the D4184 module are easy to swap.
+GPIO high = MOSFET conducts = pressed. An unpowered ESP leaves the MOSFET off. In the reference build nothing switched
+at first because TRIG and GND on the D4184 module were swapped.
 
 ### Status LEDs
 
@@ -133,9 +133,8 @@ the D4184 module are easy to swap.
 | middle (MEDIUM) | GPIO1 (ADC1) |
 | right (HIGH) | GPIO0 (ADC1) |
 
-Tap the anode leg (the one without continuity to GND). The reference build connects them directly; a 10 kΩ in each
-line would protect both sides against a slip of the soldering iron. If the order comes out wrong, swap the pins in
-the config, not the wires.
+Tap the anode leg (the one without continuity to GND). The reference build connects them directly (10 kΩ in series
+planned). If the order comes out wrong, the pins can be swapped in the config instead of the wires.
 
 ### Real-button read (optional)
 
@@ -145,8 +144,8 @@ The line idles at 5 V, so GPIO6 sits on the ESP's clamp diode (~14 µA). With mu
 could load pin 4 enough to look like a press. A resistor of 150–220 kΩ from GPIO6 to GND would make it a clean divider
 (untested here: check that the idle level stays above ~2.6 V).
 
-Without the wire, keep the default `"true"`: a floating pin produces phantom clicks, and one click while off switches
-the Flair on.
+Without the wire, keep the default `"true"`: a floating pin can produce phantom clicks, and one click while off
+switches the Flair on.
 
 ### Supply
 
@@ -154,8 +153,7 @@ Flair 24V pad → polyfuse → buck VIN (capacitor at VIN–GND); Flair GND → 
 Connecting USB while the buck feeds the 5V pin can back-feed one into the other; check whether your board has a diode
 between VBUS and 5V.
 
-The reference build still runs the ESP from USB. Powering the ESP and the Flair from the same switched outlet avoids
-the one-side-unpowered case described above.
+The reference build still runs the ESP from USB, i.e. from a separate supply.
 
 ### Other boards
 
@@ -176,8 +174,8 @@ LEDs need ADC1 (ADC2 does not work while Wi-Fi is on). Strapping pins: C3 GPIO2/
 5. Optional button read: `Button line (raw)` follows the real button; set the pull-up substitution to `"false"`.
 6. Insulate, fix the boards, put the antenna against a plastic wall, close the housing.
 
-The machine is a poor place for an antenna (the reference C3 sees −69…−73 dBm). An external antenna routed outside
-the board cavity helps; on a flaky C3 SuperMini, `wifi: output_power: 8.5dB` is a common fix.
+Wi-Fi at the machine is weak in the reference build: −69…−73 dBm with the antenna inside the housing. Moving it
+outside is planned; the Frankenflair build moved its antenna out of the cavity for the same reason.
 
 ## Firmware
 
@@ -260,8 +258,8 @@ Running both at once makes them fight; switch `Kettle sync` off on the ESP befor
 
 ## Working with an AI assistant
 
-This repo was built with one, and you will probably adapt it with one. [AGENTS.md](AGENTS.md) gives an assistant the
-measured context, so it explains findings instead of guessing pin numbers.
+This repo was built with one. [AGENTS.md](AGENTS.md) gives an assistant the measured context, so it explains findings
+instead of guessing pin numbers.
 
 ## Credits
 

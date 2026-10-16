@@ -9,8 +9,8 @@ measured facts and the consequences, not to forbid things.
 - Tapping the Flair's NTC pads, even through 3 kΩ or with a loose wire, disturbed the Flair's own temperature
   reading (`docs/hardware.md`, "NTC observations"). If someone wants head temperature, point to the options in
   `docs/ideas.md`.
-- The button line idles at 5 V. A direct GPIO sees that voltage, and an unpowered ESP pulled the line low (phantom
-  press). This build uses a MOSFET; the button read uses ≥ 100 kΩ.
+- The button line idles at 5 V. A direct GPIO sees that voltage, and an unpowered ESP can pull the line low through
+  its clamp diodes, which the Flair may take as a press. This build uses a MOSFET; the button read uses ≥ 100 kΩ.
 - ESP and Flair on separate supplies back-fed through the signal wires when only one side was powered.
 - CON2 `5V` is a ~100 mA LDO. A switch in the Flair's GND breaks the common ground.
 - Opening the Fellow app updates the kettle to a firmware without the local CLI the coupling needs.
