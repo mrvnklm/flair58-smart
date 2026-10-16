@@ -96,7 +96,7 @@ Measured on board HL-01-V2.2 (2024-08-14). Details and component list: [docs/har
 | ESP32-C3 board, ideally with external antenna | reference: DIYMall ESP32-C3 MINI V1. A C3 SuperMini fits too; its PCB antenna is weak. Needs 3 free ADC1 pins |
 | MOSFET for the button | reference: D4184 module. Smaller alternative: 2N7002 or BSS138 with 100 kΩ gate → GND (untested here) |
 | 5 V supply for the ESP | a USB power supply (what the reference build uses today) or a buck from the Flair's 24 V (parts below) |
-| Silicone wire 26–28 AWG, heat-shrink, Kapton tape | it gets warm inside the housing |
+| Thin wire (26–28 AWG), heat-shrink, Kapton tape | thin wire fits through the housing; Kapton insulates the ESP and MOSFET where they sit on or near the board. Silicone insulation is flexible and does not melt back when soldering |
 
 ### Optional
 
