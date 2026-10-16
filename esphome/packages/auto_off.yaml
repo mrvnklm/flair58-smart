@@ -1,0 +1,93 @@
+# Auto off after the shot (optional package, off by default: switch "Auto off after shot").
+#
+# Heuristic: once the Flair is at temperature ("Ready"), the brew head only drops out of temperature when
+# water goes in, i.e. when the shot is pulled. So the first reheat after Ready marks the shot, and
+# "Auto off after" seconds later the Flair goes off, whether it is still heating or not.
+#
+# Guard: a preset change (our press or the real button) also restarts heating - reheats that start
+# within 20 s of any press are ignored.
+#
+# Caveat: anything else that cools the head after Ready (a preheat flush, a cold cylinder) counts as
+# a shot too. That is why it is opt-in.
+#
+# Needs from the main config: binary_sensors `powered` / `heating` / `ready` / `real_button`,
+# script `power_off`, globals `esp_pressing` / `shot_off_ms`.
+
+globals:
+  - id: was_ready              # Ready seen since the Flair was switched on
+    type: bool
+    initial_value: "false"
+  - id: last_press_ms          # millis() of the last press (ours or the real button)
+    type: uint32_t
+    initial_value: "0"
+
+switch:
+  - platform: template
+    name: Auto off after shot
+    id: auto_off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+number:
+  - platform: template
+    name: Auto off after
+    id: auto_off_delay
+    entity_category: config
+    unit_of_measurement: s
+    mode: box
+    min_value: 1
+    max_value: 120
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: 25          # seconds from the first reheat after Ready to off
+
+binary_sensor:
+  - platform: template
+    id: any_press
+    internal: true
+    lambda: "return id(esp_pressing) || id(real_button).state;"
+    on_state:
+      - lambda: "id(last_press_ms) = millis();"
+
+  - platform: template
+    id: ready_edge
+    internal: true
+    lambda: "return id(ready).state;"
+    on_press:
+      - lambda: "id(was_ready) = true;"
+
+  - platform: template
+    id: reheat_edge
+    internal: true
+    lambda: "return id(powered).state && id(heating).state;"
+    on_press:
+      - if:
+          condition:
+            lambda: "return id(was_ready) && millis() - id(last_press_ms) > 20000;"
+          then:
+            - script.execute: auto_off_check
+
+  - platform: template
+    id: powered_edge_auto_off
+    internal: true
+    lambda: "return id(powered).state;"
+    on_release:
+      - lambda: "id(was_ready) = false;"
+      - script.stop: auto_off_check
+
+script:
+  - id: auto_off_check
+    mode: single               # the first reheat after Ready counts; later blips do not restart the timer
+    then:
+      - delay: !lambda "return (uint32_t) (id(auto_off_delay).state * 1000);"
+      - if:
+          condition:
+            lambda: "return id(auto_off).state && id(powered).state;"
+          then:
+            - logger.log: "Shot (reheat after Ready) + delay -> Flair off"
+            - homeassistant.event:
+                event: esphome.espresso_sync
+                data: {action: flair_off_after_shot}
+            - lambda: "id(shot_off_ms) = millis() | 1;"   # never 0; the kettle package plays its jingle on this
+            - script.execute: power_off

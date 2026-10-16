@@ -1,0 +1,590 @@
+# Flair 58 -> ESPHome / Home Assistant.
+#
+# The original Flair firmware stays in charge of heating. The ESP only
+#   - presses the button S1 through a MOSFET (S1 is active-low on U2 pin 4),
+#   - reads the three status LEDs through ADC1 pins (anode legs, ~2.2 V when lit),
+#   - optionally reads the real button (100 kΩ series resistor) to count clicks,
+#   - switches the machine off after `safety_off_min` minutes, independent of Home Assistant.
+# It has no brew head temperature: tapping the Flair's NTC disturbed its own reading (docs/hardware.md).
+#
+# Optional packages (comment out what you do not have, the base config compiles on its own):
+#   kettle   - Fellow Stagg EKG Pro coupling over Wi-Fi (kettle firmware 1.1.x only, see docs/kettle.md)
+#   auto_off - switch off shortly after the shot
+#
+# Reference hardware: ESP32-C3 + D4184 MOSFET module on board HL-01-V2.2. Wiring: README.md.
+# Behaviour, entities and tuning: docs/firmware.md.
+
+substitutions:
+  name: flair58
+  friendly_name: Flair 58
+
+  # --- GPIO mapping (ESP32-C3). Avoid GPIO2/8/9 (strapping) and GPIO20/21 (UART). ---
+  # LEDs need ADC1 pins: ADC2 does not work while Wi-Fi is on. On the C3, ADC1 = GPIO0-4.
+  pin_button: GPIO10         # -> MOSFET gate / module TRIG. High = MOSFET conducts = S1 pressed
+  pin_button_read_num: "6"   # <- 100 kΩ <- S1 leg on U2 pin 4. Below 100 kΩ an unpowered ESP may look like a press (README)
+  # "true" while the read wire is NOT installed: the internal pull-up keeps the open pin at "released"
+  # (a floating pin produces phantom clicks, and one click while off switches the Flair on).
+  # Set "false" once the 100 kΩ read wire is in: the pull-up would then mask real presses.
+  pin_button_read_pullup: "true"
+  pin_led_1: GPIO4           # LED left   = LOW
+  pin_led_2: GPIO1           # LED middle = MEDIUM
+  pin_led_3: GPIO0           # LED right  = HIGH
+
+  # --- Behaviour ---
+  led_on_v: "1.2"            # a lit LED measures ~2.2 V at the anode
+  led_off_v: "0.6"
+  long_press_ms: "1300"      # on/off (the manual says 3 s; 1300 ms is enough)
+  short_press_ms: "50"       # preset step
+  blink_window_ms: "1200"    # two LED edges within this window = "blinking" (the heating blink is ~1 s)
+  safety_off_min: "45"       # ESP-side auto off after this many minutes powered
+
+packages:
+  kettle: !include packages/kettle_wifi.yaml
+  auto_off: !include packages/auto_off.yaml
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  includes:
+    - button_clicks.h        # click counting in an ISR (see the file for why)
+  on_boot:
+    - priority: 200          # after the GPIO setup
+      then:
+        - lambda: "button_clicks::setup(${pin_button_read_num}, &id(esp_pressing));"
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Light sleep delays every outgoing HTTP request until the next beacon (100-640 ms instead of ~0.1 s).
+  # The ESP is mains powered, so no power saving.
+  power_save_mode: none
+  # Mesh Wi-Fi with 802.11v/k? These let the AP steer the ESP to the closer node:
+  # enable_btm: true
+  # enable_rrm: true
+  ap:
+    ssid: Flair58 Setup
+    password: !secret ap_password
+
+captive_portal:
+
+globals:
+  - id: last_long_press_ms     # millis() of the last long press (toggle guard)
+    type: uint32_t
+    initial_value: "0"
+  - id: esp_pressing           # true while our own script holds the line, to ignore the echo
+    type: bool
+    initial_value: "false"
+  - id: flair_off_since        # millis() of the last Flair off edge
+    type: uint32_t
+    initial_value: "0"
+  - id: flair_start_ok         # last on edge counts as a real start (>= 2 s off, not right after boot)
+    type: bool
+    initial_value: "false"
+  # Hooks for the optional packages, so the base config compiles without them:
+  - id: button_multi_clicks    # click count (>= 2) of the last sequence while off; packages consume and reset it
+    type: int
+    initial_value: "0"
+  - id: shot_off_ms            # millis() of the last auto off after a shot (set by packages/auto_off.yaml)
+    type: uint32_t
+    initial_value: "0"
+  - id: led_1_prev_toggle
+    type: uint32_t
+    initial_value: "0"
+  - id: led_1_last_toggle
+    type: uint32_t
+    initial_value: "0"
+  - id: led_2_prev_toggle
+    type: uint32_t
+    initial_value: "0"
+  - id: led_2_last_toggle
+    type: uint32_t
+    initial_value: "0"
+  - id: led_3_prev_toggle
+    type: uint32_t
+    initial_value: "0"
+  - id: led_3_last_toggle
+    type: uint32_t
+    initial_value: "0"
+
+# ---------------------------------------------------------------------------
+# Button simulation
+# ---------------------------------------------------------------------------
+output:
+  # MOSFET between the S1 leg on U2 pin 4 and GND. An unpowered ESP leaves the MOSFET off,
+  # so it can never "press" the button by accident.
+  - platform: gpio
+    id: button_line
+    pin: ${pin_button}
+
+script:
+  # Every press goes through this one queued script, so a short press can never cut into a long one
+  # (or the other way round), and esp_pressing stays true for the whole press.
+  - id: press
+    mode: queued
+    parameters:
+      ms: int
+    then:
+      - lambda: "id(esp_pressing) = true;"
+      - output.turn_on: button_line
+      - delay: !lambda "return (uint32_t) ms;"
+      - output.turn_off: button_line
+      - delay: !lambda "return (uint32_t) id(press_gap).state;"   # pause before the next press
+      - lambda: "id(esp_pressing) = false;"
+
+  - id: press_short
+    mode: queued
+    then:
+      - script.execute: {id: press, ms: !lambda "return (int) id(short_press).state;"}
+      - script.wait: press
+
+  - id: press_long
+    mode: single
+    then:
+      - lambda: "id(last_long_press_ms) = millis();"
+      - script.execute: {id: press, ms: !lambda "return (int) id(long_press).state;"}
+      - script.wait: press
+
+  - id: toggle_verified
+    mode: single
+    parameters:
+      want_on: bool
+    then:
+      # S1 only toggles. Re-check right before pressing, and never toggle within 3 s of a long press:
+      # "Powered" lags 1.2 s behind an off (blink bridging), so a stale request would switch it back on.
+      - if:
+          condition:
+            lambda: "return id(powered).state != want_on && millis() - id(last_long_press_ms) > 3000;"
+          then:
+            - script.execute: press_long
+            - script.wait: press_long
+            - delay: 4s              # LED blink bridging needs ~1.5 s to settle
+            - if:
+                condition:
+                  lambda: "return id(powered).state != want_on;"
+                then:
+                  - logger.log:
+                      level: WARN
+                      format: "Power toggle not confirmed: wanted %s, LEDs say %s"
+                      args: ['want_on ? "on" : "off"', 'id(powered).state ? "on" : "off"']
+                  - homeassistant.event:
+                      event: esphome.flair_toggle_unconfirmed
+                      data:
+                        wanted: !lambda 'return want_on ? "on" : "off";'
+          else:
+            - logger.log: "Toggle skipped: already in the wanted state or a long press just happened"
+
+  # Switch off with retries: toggle_verified may be busy (mode single drops the call) or the press
+  # may not register. Used by every automatic off (safety, auto off, kettle off).
+  - id: power_off
+    mode: single
+    then:
+      - repeat:
+          count: 3
+          then:
+            - if:
+                condition:
+                  binary_sensor.is_on: powered
+                then:
+                  - script.wait: toggle_verified
+                  - script.execute: {id: toggle_verified, want_on: false}
+                  - script.wait: toggle_verified
+
+  # Independent of Home Assistant: switch off after safety_off_min minutes powered.
+  - id: safety_off
+    mode: restart
+    then:
+      - delay: ${safety_off_min}min
+      - if:
+          condition:
+            binary_sensor.is_on: powered
+          then:
+            - logger.log: "Safety off after ${safety_off_min} min"
+            - script.execute: power_off
+
+  - id: press_n
+    mode: single
+    parameters:
+      n: int
+    then:
+      - repeat:
+          count: !lambda "return n;"
+          then:
+            - script.execute: press_short
+            - script.wait: press_short
+
+  # The Flair always starts on LOW. Two short presses = HIGH. The LEDs come on while the long press is
+  # still held (ours or the real button); a short press sent then merges into it and is lost, so wait
+  # for the release first.
+  - id: start_high_after_on
+    mode: single
+    then:
+      - wait_until:
+          condition:
+            lambda: "return !id(esp_pressing) && !id(real_button).state;"
+          timeout: 6s
+      - if:
+          condition:
+            switch.is_on: start_high
+          then:
+            - delay: 100ms
+            - script.execute: {id: press_n, n: 2}
+            - script.wait: press_n
+
+# Clicks counted by button_clicks.h. A sequence ends 250 ms after the last release. The Flair ignores
+# short presses while it is off, so they are free to use: 1 click = Flair on; 2 or more are handed to
+# the packages through `button_multi_clicks` (the kettle package plays a melody on >= 3).
+interval:
+  - interval: 50ms
+    then:
+      - lambda: |-
+          std::string timing;
+          const int n = button_clicks::take(250, timing);
+          if (n == 0) return;
+          ESP_LOGI("button", "%d click(s), Flair %s, ms: %s", n, id(powered).state ? "on" : "off", timing.c_str());
+          if (id(powered).state) return;
+          if (n == 1 && id(short_press_start).state) {
+            ESP_LOGI("button", "Short press while off -> Flair on");
+            id(toggle_verified).execute(true);
+          } else if (n >= 2) {
+            id(button_multi_clicks) = n;
+          }
+
+button:
+  - platform: template
+    name: Power toggle
+    on_press:
+      - script.execute: press_long
+
+  - platform: template
+    name: Next preset
+    on_press:
+      - script.execute: press_short
+
+  - platform: restart
+    name: Restart
+
+switch:
+  - platform: template
+    name: Short press starts
+    id: short_press_start
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: Start on HIGH
+    id: start_high
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  # S1 only toggles, and "Powered" is derived from the LEDs. If that derivation is wrong,
+  # a turn_off would switch the machine ON - so every toggle is verified afterwards.
+  - platform: template
+    name: Power
+    id: power_switch
+    restore_mode: DISABLED     # never toggle at boot
+    lambda: "return id(powered).state;"
+    turn_on_action:
+      - if:
+          condition:
+            binary_sensor.is_off: powered
+          then:
+            - script.execute: {id: toggle_verified, want_on: true}
+    turn_off_action:
+      - if:
+          condition:
+            binary_sensor.is_on: powered
+          then:
+            - script.execute: {id: toggle_verified, want_on: false}
+
+# ---------------------------------------------------------------------------
+# Status LEDs (analog: 2.2 V is below the ESP32's guaranteed digital high)
+# ---------------------------------------------------------------------------
+sensor:
+  - platform: adc
+    id: led_1_v
+    internal: true
+    pin: ${pin_led_1}
+    attenuation: 12db
+    update_interval: 100ms
+
+  - platform: adc
+    id: led_2_v
+    internal: true
+    pin: ${pin_led_2}
+    attenuation: 12db
+    update_interval: 100ms
+
+  - platform: adc
+    id: led_3_v
+    internal: true
+    pin: ${pin_led_3}
+    attenuation: 12db
+    update_interval: 100ms
+
+  # Slow copies for checking the levels in HA (wiring check).
+  - platform: copy
+    source_id: led_1_v
+    name: LED 1 voltage
+    entity_category: diagnostic
+    filters:
+      - throttle_average: 5s
+
+  - platform: copy
+    source_id: led_2_v
+    name: LED 2 voltage
+    entity_category: diagnostic
+    filters:
+      - throttle_average: 5s
+
+  - platform: copy
+    source_id: led_3_v
+    name: LED 3 voltage
+    entity_category: diagnostic
+    filters:
+      - throttle_average: 5s
+
+  - platform: template
+    name: Preset index
+    id: preset_index
+    accuracy_decimals: 0
+    update_interval: 1s
+    # Highest active LED = preset. Works for both displays: preset LED blinking (lower ones solid) while
+    # heating, solid bar when ready. 1 = LOW ~85 °C, 2 = MEDIUM ~90 °C, 3 = HIGH ~95 °C, 0 = off.
+    lambda: |-
+      if (id(led_3_active).state) return 3;
+      if (id(led_2_active).state) return 2;
+      if (id(led_1_active).state) return 1;
+      return 0;
+
+  - platform: wifi_signal
+    name: Wi-Fi signal
+    update_interval: 60s
+
+binary_sensor:
+  # Raw level of the real-button read pin (low = pressed).
+  - platform: gpio
+    id: button_raw
+    name: Button line (raw)      # also shows our own MOSFET presses - wiring check
+    entity_category: diagnostic
+    use_interrupt: false         # the pin's interrupt belongs to button_clicks.h
+    pin:
+      number: GPIO${pin_button_read_num}
+      inverted: true
+      mode:
+        input: true
+        pullup: ${pin_button_read_pullup}
+
+  # The real button S1. Our own presses are ignored.
+  - platform: template
+    name: Button
+    id: real_button
+    lambda: |-
+      if (id(esp_pressing)) return false;
+      return id(button_raw).state;
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms        # contact bounce
+    on_click:
+      - min_length: 30ms
+        max_length: 600ms
+        then:
+          - homeassistant.event:
+              event: esphome.flair_button
+              data:
+                type: short_press
+                machine: !lambda 'return id(powered).state ? "on" : "off";'
+      - min_length: 601ms
+        max_length: 10s
+        then:
+          - homeassistant.event:
+              event: esphome.flair_button
+              data:
+                type: long_press
+                machine: !lambda 'return id(powered).state ? "on" : "off";'
+
+  # LED state from the ADC readings (sampled every 100 ms, sent to HA on every edge)
+  - platform: analog_threshold
+    name: LED 1
+    id: led_1_raw
+    sensor_id: led_1_v
+    threshold:
+      upper: ${led_on_v}
+      lower: ${led_off_v}
+    on_state:
+      - lambda: "id(led_1_prev_toggle) = id(led_1_last_toggle); id(led_1_last_toggle) = millis();"
+
+  - platform: analog_threshold
+    name: LED 2
+    id: led_2_raw
+    sensor_id: led_2_v
+    threshold:
+      upper: ${led_on_v}
+      lower: ${led_off_v}
+    on_state:
+      - lambda: "id(led_2_prev_toggle) = id(led_2_last_toggle); id(led_2_last_toggle) = millis();"
+
+  - platform: analog_threshold
+    name: LED 3
+    id: led_3_raw
+    sensor_id: led_3_v
+    threshold:
+      upper: ${led_on_v}
+      lower: ${led_off_v}
+    on_state:
+      - lambda: "id(led_3_prev_toggle) = id(led_3_last_toggle); id(led_3_last_toggle) = millis();"
+
+  # "Active" = lit or blinking (blink gaps bridged)
+  - platform: template
+    id: led_1_active
+    internal: true
+    lambda: "return id(led_1_raw).state;"
+    filters:
+      - delayed_off: ${blink_window_ms}ms
+
+  - platform: template
+    id: led_2_active
+    internal: true
+    lambda: "return id(led_2_raw).state;"
+    filters:
+      - delayed_off: ${blink_window_ms}ms
+
+  - platform: template
+    id: led_3_active
+    internal: true
+    lambda: "return id(led_3_raw).state;"
+    filters:
+      - delayed_off: ${blink_window_ms}ms
+
+  - platform: template
+    name: Powered
+    id: powered
+    lambda: |-
+      return id(led_1_active).state || id(led_2_active).state || id(led_3_active).state;
+    on_press:
+      - script.execute: safety_off
+      # Decided once here; the kettle package reads the same flag. Not at boot (LEDs are sampled for the
+      # first time), and only after >= 2 s off (blink gaps are not an off).
+      - lambda: "id(flair_start_ok) = millis() > 15000 && millis() - id(flair_off_since) >= 2000;"
+      - if:
+          condition:
+            lambda: "return id(flair_start_ok);"
+          then:
+            - script.execute: start_high_after_on
+    on_release:
+      - script.stop: safety_off
+      - lambda: "id(flair_off_since) = millis();"
+
+  # Blinking LED = still heating (Flair manual); all LEDs of the bar solid = temperature reached.
+  - platform: template
+    name: Heating
+    id: heating
+    # Blinking = two edges close together AND the latest edge is recent. A single edge (LED just
+    # switched on at power-on, or off at power-off) is not a blink.
+    lambda: |-
+      const uint32_t now = millis();
+      const uint32_t win = ${blink_window_ms};
+      auto blinking = [&](uint32_t prev, uint32_t last) {
+        return prev != 0 && (last - prev) < win && (now - last) < win;
+      };
+      return id(powered).state &&
+             (blinking(id(led_1_prev_toggle), id(led_1_last_toggle)) ||
+              blinking(id(led_2_prev_toggle), id(led_2_last_toggle)) ||
+              blinking(id(led_3_prev_toggle), id(led_3_last_toggle)));
+
+  - platform: template
+    name: Ready
+    id: ready
+    lambda: "return id(powered).state && !id(heating).state;"
+    filters:
+      - delayed_on: 3s
+
+number:
+  # Tunable from HA, in case your board revision needs other press lengths.
+  - platform: template
+    name: Long press
+    id: long_press
+    entity_category: config
+    unit_of_measurement: ms
+    mode: box
+    min_value: 100
+    max_value: 5000
+    step: 50
+    optimistic: true
+    restore_value: true
+    initial_value: ${long_press_ms}
+
+  - platform: template
+    name: Press gap
+    id: press_gap
+    entity_category: config
+    unit_of_measurement: ms
+    mode: box
+    min_value: 0
+    max_value: 1000
+    step: 10
+    optimistic: true
+    restore_value: true
+    initial_value: 50
+
+  - platform: template
+    name: Short press
+    id: short_press
+    entity_category: config
+    unit_of_measurement: ms
+    mode: box
+    min_value: 30
+    max_value: 1000
+    step: 10
+    optimistic: true
+    restore_value: true
+    initial_value: ${short_press_ms}
+
+select:
+  # Preset by name. A short press cycles LOW -> MEDIUM -> HIGH (manual); wrap-around HIGH -> LOW assumed.
+  - platform: template
+    name: Preset
+    id: preset_select
+    update_interval: 1s
+    options: ["Low ~85 °C", "Medium ~90 °C", "High ~95 °C"]
+    lambda: |-
+      switch ((int) id(preset_index).state) {
+        case 1: return {"Low ~85 °C"};
+        case 2: return {"Medium ~90 °C"};
+        case 3: return {"High ~95 °C"};
+        default: return {};
+      }
+    set_action:
+      - script.execute:
+          id: press_n
+          n: !lambda |-
+            const int current = (int) id(preset_index).state;
+            if (current < 1) return 0;  // machine off -> do nothing
+            const int target = x.find("Low") == 0 ? 1 : (x.find("Medium") == 0 ? 2 : 3);
+            return (target - current + 3) % 3;
+
+text_sensor:
+  # One readable state for dashboards and automations.
+  - platform: template
+    name: Status
+    id: flair_status
+    update_interval: 1s
+    lambda: |-
+      if (!id(powered).state) return {"off"};
+      if (id(heating).state) return {"heating"};
+      if (id(ready).state) return {"ready"};
+      return {"settling"};

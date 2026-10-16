@@ -1,0 +1,104 @@
+# Alternative: Flair <-> kettle coupling in Home Assistant instead of on the ESP.
+#
+# Use this when the ESP cannot reach the kettle over Wi-Fi, e.g. a kettle on firmware 1.2.x that the
+# HA integration `fellow_stagg` controls over Bluetooth. Leave out packages/kettle_wifi.yaml then, or at
+# least keep its "Kettle sync" switch off: two couplings at once fight each other.
+#
+# The kettle entity IDs below are placeholders: the integration names them after your device and HA language.
+# Turn on "Start on HIGH" on the ESP if you want HIGH after power-on.
+#
+# This was the first version of the coupling, before it moved to the ESP. It is slower (HA polls the kettle)
+# and needs HA to be up, but works with any kettle HA can switch. The last automation (Flair off -> kettle off)
+# mirrors the ESP behaviour and has not been run in HA yet.
+# Limitation: no lift/resume guard. A kettle put back on its base after a lift may resume heating and switch the
+# Flair back on (the ESP coupling ignores S_STANDBY -> S_HEAT).
+
+- id: espresso_kettle_on_flair_on
+  alias: Espresso - kettle on -> Flair on
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: climate.YOUR_KETTLE
+      to: heat
+  conditions:
+    - condition: state
+      entity_id: binary_sensor.flair_58_powered
+      state: "off"
+  actions:
+    - action: switch.turn_on
+      target:
+        entity_id: switch.flair_58_power
+
+- id: espresso_flair_on_kettle_on
+  alias: Espresso - Flair on -> kettle on
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.flair_58_powered
+      from: "off"
+      to: "on"
+  conditions:
+    - condition: not
+      conditions:
+        - condition: state
+          entity_id: climate.YOUR_KETTLE
+          state: heat
+    - condition: state
+      entity_id: binary_sensor.YOUR_KETTLE_ON_BASE
+      state: "on"
+    - condition: state
+      entity_id: binary_sensor.YOUR_KETTLE_NO_WATER
+      state: "off"
+  actions:
+    - action: climate.set_temperature
+      target:
+        entity_id: climate.YOUR_KETTLE
+      data:
+        temperature: 94
+        hvac_mode: heat
+
+- id: espresso_kettle_off_flair_off
+  alias: Espresso - kettle off -> Flair off
+  description: >-
+    Kettle off while the Flair is on -> Flair off. Lifting the kettle to pour must not count, so wait up to
+    2 s for "on base": the integration updates climate and on-base a few ms apart.
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: climate.YOUR_KETTLE
+      from: heat
+      to: "off"
+  conditions:
+    - condition: state
+      entity_id: binary_sensor.flair_58_powered
+      state: "on"
+  actions:
+    - wait_template: "{{ is_state('binary_sensor.YOUR_KETTLE_ON_BASE', 'on') }}"
+      timeout: "00:00:02"
+      continue_on_timeout: false
+    - condition: state
+      entity_id: climate.YOUR_KETTLE
+      state: "off"
+    - action: switch.turn_off
+      target:
+        entity_id: switch.flair_58_power
+
+- id: espresso_flair_off_kettle_off
+  alias: Espresso - Flair off -> kettle off
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.flair_58_powered
+      from: "on"
+      to: "off"
+      for: "00:00:02"
+  conditions:
+    - condition: state
+      entity_id: climate.YOUR_KETTLE
+      state: heat
+  actions:
+    - action: climate.set_hvac_mode
+      target:
+        entity_id: climate.YOUR_KETTLE
+      data:
+        hvac_mode: "off"

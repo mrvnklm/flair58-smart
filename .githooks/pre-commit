@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Checks the staged content (the index, not the working tree). Enable: git config core.hooksPath .githooks
+set -euo pipefail
+files=()
+while IFS= read -r f; do files+=("$f"); done < <(git diff --cached --name-only --diff-filter=ACMR)
+[ ${#files[@]} -eq 0 ] && exit 0
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+git checkout-index --prefix="$tmp/" -- "${files[@]}"
+python3 tools/check_language.py --root "$tmp" --files "${files[@]}"

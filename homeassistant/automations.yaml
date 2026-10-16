@@ -1,0 +1,41 @@
+# Example automations. Replace notify.mobile_app_YOUR_PHONE with your notify service.
+
+- id: espresso_both_ready
+  alias: Espresso - notify when head and water are ready
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.espresso_ready     # homeassistant/templates.yaml
+      to: "on"
+      for: "00:00:30"    # "Ready" is LED-derived and can blip on preset changes
+  actions:
+    - action: notify.mobile_app_YOUR_PHONE
+      data:
+        title: ☕ Ready
+        message: Flair head and water are at temperature.
+
+- id: espresso_toggle_unconfirmed
+  alias: Espresso - power toggle not confirmed
+  description: The ESP pressed on/off but the LEDs did not follow. Check the machine.
+  mode: single
+  triggers:
+    - trigger: event
+      event_type: esphome.flair_toggle_unconfirmed
+  actions:
+    - action: notify.mobile_app_YOUR_PHONE
+      data:
+        title: Flair 58
+        message: "Wanted {{ trigger.event.data.wanted }}, but the LEDs disagree. Check the machine."
+
+- id: espresso_morning_preheat
+  alias: Espresso - weekday morning preheat
+  initial_state: false   # enable once everything works
+  mode: single
+  triggers:
+    - trigger: time
+      at: "07:00:00"
+  conditions:
+    - condition: time
+      weekday: [mon, tue, wed, thu, fri]
+  actions:
+    - action: script.espresso

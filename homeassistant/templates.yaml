@@ -1,0 +1,14 @@
+# "Espresso ready": brew head and water at temperature.
+# Add under `template:` in configuration.yaml (or include this file).
+# Entity IDs assume the ESPHome device is named "Flair 58" and the kettle package is installed.
+# Using the HA kettle integration instead? Replace the kettle condition with its "water ready" sensor.
+# Untested as written: the S_HOLD check replaced the integration's sensor; after an ESP reboot the mode is
+# unknown until the first kettle poll (2 s).
+
+- binary_sensor:
+    - name: Espresso ready
+      unique_id: espresso_ready
+      icon: mdi:coffee
+      state: >
+        {{ is_state('binary_sensor.flair_58_ready', 'on')
+           and states('sensor.flair_58_kettle_mode').startswith('S_HOLD') }}

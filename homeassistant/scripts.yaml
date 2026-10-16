@@ -1,0 +1,30 @@
+# script.espresso: preheat for a shot. The ESP does the rest: with "Kettle sync" on, the kettle follows the
+# Flair; with "Start on HIGH" on, the Flair steps to HIGH by itself. The preset field covers the other cases.
+
+espresso:
+  alias: Espresso - preheat
+  mode: single
+  fields:
+    preset:
+      description: Flair preset (leave empty to keep what the ESP chooses)
+      selector:
+        select:
+          options: ["Low ~85 °C", "Medium ~90 °C", "High ~95 °C"]
+  sequence:
+    - action: switch.turn_on
+      target:
+        entity_id: switch.flair_58_power
+    - wait_template: "{{ is_state('switch.flair_58_power', 'on') }}"
+      timeout: "00:00:10"
+      continue_on_timeout: false
+    - if:
+        - condition: template
+          value_template: "{{ preset is defined and preset != '' }}"
+      then:
+        # Let "Start on HIGH" finish its presses first.
+        - delay: "00:00:04"
+        - action: select.select_option
+          target:
+            entity_id: select.flair_58_preset
+          data:
+            option: "{{ preset }}"

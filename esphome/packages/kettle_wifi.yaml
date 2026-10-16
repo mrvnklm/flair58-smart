@@ -1,0 +1,403 @@
+# Fellow Stagg EKG Pro coupling over Wi-Fi (optional package). Logic runs on the ESP; HA only shows
+# state and toggles the switches.
+#
+# Kettle firmware 1.1.x only: it has a local, unauthenticated HTTP CLI (`/cli?cmd=...`).
+# Firmware 1.2.x mutes that CLI and pauses Wi-Fi while heating - such a kettle needs a BLE path (not built,
+# see docs/kettle.md) or the HA-side coupling in homeassistant/kettle_coupling_ha.yaml.
+#
+#   Kettle starts heating          -> Flair on (if off)
+#   Flair switched on              -> (Start on HIGH, main config) -> kettle heats to "Kettle target"
+#   Kettle stops heating, on base  -> Flair off (2 s settle: lift/base flags arrive with a delay)
+#   Kettle back on its base after a lift (S_STANDBY -> S_HEAT) -> nothing: a resume, not a start
+#   Flair goes off (any cause)     -> kettle off
+#   Auto off after the shot        -> 1 s jingle on the kettle first ("Auto off jingle")
+#   >= 3 short presses, Flair off  -> random melody on the kettle buzzer ("Melody on triple press")
+#
+# Set the kettle's IP in HA (entity "Kettle IP"); give the kettle a fixed DHCP lease. Empty = coupling idle.
+#
+# Needs from the main config: binary_sensors `powered` / `real_button`, scripts `toggle_verified` /
+# `power_off` / `start_high_after_on`, globals `esp_pressing` / `flair_start_ok` / `button_multi_clicks` /
+# `shot_off_ms`. HTTP requests block the main loop (~150-470 ms), so they never run while a button press is
+# held - a stretched short press could turn into an on/off long press.
+
+esphome:
+  includes:
+    - packages/kettle_melodies.h   # relative to the main config's directory
+
+substitutions:
+  kettle_ip_default: ""        # or your kettle's IP; changeable at runtime via the "Kettle IP" entity
+
+http_request:
+  timeout: 1s
+  verify_ssl: false            # plain http on the local IoT network
+
+globals:
+  - id: kettle_valid           # last poll parsed fine, so edges are real transitions
+    type: bool
+    initial_value: "false"
+  - id: kettle_was_heating
+    type: bool
+    initial_value: "false"
+  - id: kettle_fail_count
+    type: int
+    initial_value: "0"
+  - id: kettle_no_water
+    type: bool
+    initial_value: "false"
+  - id: kettle_backoff
+    type: int
+    initial_value: "0"
+  - id: melody_sel           # kettle_melody: index into KETTLE_MELODIES, read position, current note
+    type: int
+    initial_value: "0"
+  - id: melody_pos
+    type: int
+    initial_value: "0"
+  - id: melody_cmd           # current `buz` chunk, empty = rest
+    type: std::string
+    initial_value: '""'
+  - id: melody_ms
+    type: int
+    initial_value: "0"
+  - id: melody_t0
+    type: uint32_t
+    initial_value: "0"
+  - id: kettle_prev_mode       # base mode (suffix like "+TSET" cut off) of the previous valid poll
+    type: std::string
+    initial_value: '""'
+
+text:
+  - platform: template
+    name: Kettle IP
+    id: kettle_ip
+    entity_category: config
+    mode: text
+    optimistic: true
+    restore_value: true
+    initial_value: "${kettle_ip_default}"
+
+number:
+  - platform: template
+    name: Kettle target
+    id: kettle_target
+    entity_category: config
+    unit_of_measurement: °C
+    mode: box
+    min_value: 40
+    max_value: 100
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: 94
+
+switch:
+  # Together with the HA-side coupling (homeassistant/kettle_coupling_ha.yaml) the two would fight each other.
+  - platform: template
+    name: Kettle sync
+    id: kettle_sync
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: Auto off jingle
+    id: auto_off_jingle
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: Melody on triple press
+    id: melody_triple
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+button:
+  - platform: template
+    name: Play kettle melody   # a random joke melody, for testing without the Flair button
+    on_press:
+      - script.execute: {id: kettle_melody, m: -1}
+
+sensor:
+  - platform: template
+    name: Kettle temperature
+    id: kettle_temp
+    unit_of_measurement: °C
+    device_class: temperature
+    accuracy_decimals: 0
+    filters:
+      - or:
+          - throttle: 60s
+          - delta: 1.0
+
+text_sensor:
+  - platform: template
+    name: Kettle mode
+    id: kettle_mode
+
+binary_sensor:
+  - platform: template
+    name: Kettle heating
+    id: kettle_heating
+
+  - platform: template
+    name: Kettle on base
+    id: kettle_on_base
+
+  # Auto off after the shot (packages/auto_off.yaml) sets shot_off_ms -> jingle.
+  - platform: template
+    id: shot_off_edge
+    internal: true
+    lambda: "return id(shot_off_ms) != 0 && millis() - id(shot_off_ms) < 3000;"
+    on_press:
+      - lambda: "id(shot_off_ms) = 0;"   # consumed; otherwise millis() wrap-around would fire it again
+      - script.execute: kettle_auto_off_jingle
+
+  - platform: template
+    name: Kettle reachable
+    id: kettle_reachable
+    device_class: connectivity
+    entity_category: diagnostic
+
+  # Edge detector on the Flair's power state (kept out of `powered` so the main config stays untouched).
+  - platform: template
+    id: flair_power_edge
+    internal: true
+    lambda: "return id(powered).state;"
+    on_press:
+      - if:
+          condition:
+            lambda: "return id(flair_start_ok);"   # decided in the main config's `powered`
+          then:
+            - script.execute: on_flair_started
+    on_release:
+      - if:
+          condition:
+            lambda: "return millis() > 15000;"
+          then:
+            - script.execute: on_flair_stopped
+
+interval:
+  # Click sequences from the main config (button_clicks.h). >= 3: a fast triple tap can arrive as 4 clicks.
+  - interval: 50ms
+    then:
+      - lambda: |-
+          const int n = id(button_multi_clicks);
+          if (n == 0) return;
+          id(button_multi_clicks) = 0;
+          if (n >= 3 && !id(powered).state && id(melody_triple).state) {
+            ESP_LOGI("button", "Triple press while off -> kettle melody");
+            id(kettle_melody).execute(-1);
+          }
+
+  - interval: 2s
+    then:
+      - if:
+          condition:
+            # Unreachable kettle: every request blocks the loop up to the 1 s timeout, so back off to every 10 s.
+            lambda: |-
+              if (id(esp_pressing) || id(kettle_ip).state.empty() || id(kettle_melody).is_running()) return false;
+              return id(kettle_fail_count) < 3 || (++id(kettle_backoff) % 5) == 0;
+          then:
+            - http_request.get:
+                url: !lambda 'return "http://" + id(kettle_ip).state + "/cli?cmd=state";'
+                capture_response: true
+                max_response_buffer_size: 1536
+                on_response:
+                  then:
+                    - lambda: |-
+                        auto field = [&](const char *key) -> std::string {
+                          const std::string k = std::string("\n") + key;
+                          size_t p = body.find(k);
+                          if (p == std::string::npos) return "";
+                          p += k.size();
+                          const size_t e = body.find_first_of("\r\n", p);
+                          return body.substr(p, e == std::string::npos ? std::string::npos : e - p);
+                        };
+                        std::string mode = field("mode=");
+                        if (response->status_code != 200 || mode.empty()) {
+                          // Muted CLI (firmware 1.2.x) or garbage: treat like unreachable.
+                          if (++id(kettle_fail_count) >= 3) { id(kettle_valid) = false; id(kettle_reachable).publish_state(false); }
+                          return;
+                        }
+                        for (auto &c : mode) c = toupper(c);
+                        // Turning the dial adds "+TSET" (S_HEAT+TSET, S_STANDBY+TSET). Without cutting it off,
+                        // S_HOLD -> S_HEAT+TSET -> S_HEAT looks like stop + start.
+                        const std::string base_mode = mode.substr(0, mode.find('+'));
+                        const std::string tempr = field("tempr=");
+                        const bool lifted = tempr.empty() || tempr.rfind("nan", 0) == 0;
+                        // Positive list: an unknown/idle mode must not count as heating.
+                        const bool heating = base_mode == "S_HEAT" || base_mode == "S_HOLD" || base_mode == "S_STARTUPTOTEMPR";
+                        id(kettle_no_water) = field("ketl=").find("nw 1") != std::string::npos;
+
+                        id(kettle_fail_count) = 0;
+                        id(kettle_reachable).publish_state(true);
+                        if (id(kettle_mode).state != mode) id(kettle_mode).publish_state(mode);
+                        id(kettle_heating).publish_state(heating);
+                        id(kettle_on_base).publish_state(!lifted);
+                        if (!lifted) id(kettle_temp).publish_state(atof(tempr.c_str()));
+
+                        if (id(kettle_valid) && heating != id(kettle_was_heating)) {
+                          // S_STANDBY = lifted while on. Back on the base it resumes S_HEAT by itself - that is
+                          // not a start (it would switch the Flair back on after auto off). Lifted while off
+                          // stays S_OFF, so filling the kettle and switching it on still counts.
+                          if (heating && id(kettle_prev_mode) == "S_STANDBY")
+                            ESP_LOGI("kettle", "Kettle back on the base, resumes heating -> no Flair on");
+                          else if (heating) id(on_kettle_started).execute();
+                          else id(on_kettle_stopped).execute();
+                        }
+                        id(kettle_was_heating) = heating;
+                        id(kettle_prev_mode) = base_mode;
+                        id(kettle_valid) = true;
+                on_error:
+                  then:
+                    - lambda: |-
+                        if (++id(kettle_fail_count) >= 3) { id(kettle_valid) = false; id(kettle_reachable).publish_state(false); }
+
+script:
+  - id: kettle_cli
+    mode: queued
+    parameters:
+      cmd: std::string
+    then:
+      - wait_until:              # never block the loop while a press is held
+          condition:
+            lambda: "return !id(esp_pressing);"
+          timeout: 7s
+      - if:
+          condition:
+            lambda: "return !id(esp_pressing);"
+          then:
+            - logger.log:
+                format: "Kettle CLI: %s"
+                args: ["cmd.c_str()"]
+            - http_request.get:
+                url: !lambda |-
+                  // The kettle's web server decodes "+" but not "%20".
+                  std::string enc = cmd;
+                  for (auto &c : enc) if (c == ' ') c = '+';
+                  return "http://" + id(kettle_ip).state + "/cli?cmd=" + enc;
+          else:
+            - logger.log:
+                level: WARN
+                format: "Kettle CLI skipped (press still held): %s"
+                args: ["cmd.c_str()"]
+
+  # Auto off after the shot (packages/auto_off.yaml). The kettle itself goes off through on_flair_stopped,
+  # which waits for this jingle.
+  - id: kettle_auto_off_jingle
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: "return id(kettle_sync).state && id(kettle_valid) && id(auto_off_jingle).state;"
+          then:
+            - script.execute: {id: kettle_melody, m: !lambda "return KETTLE_MELODY_JINGLE;"}
+
+  # Flair off -> kettle off. 2 s settle, then only if the Flair is still off.
+  - id: on_flair_stopped
+    mode: restart
+    then:
+      - delay: 2s
+      - script.wait: kettle_melody   # let the auto-off jingle finish first
+      - if:
+          condition:
+            lambda: |-
+              return !id(powered).state && id(kettle_sync).state && id(kettle_valid) &&
+                     id(kettle_mode).state.rfind("S_OFF", 0) != 0;
+          then:
+            - logger.log: "Flair off -> kettle off"
+            - homeassistant.event:
+                event: esphome.espresso_sync
+                data: {action: kettle_off_by_flair}
+            - script.execute: {id: kettle_cli, cmd: "setstate S_Off"}
+
+  # Plays KETTLE_MELODIES[m] note by note (m < 0: a random one of the jokes, entry 0 is the jingle).
+  # One blocking `buz` request per note, never while a press is held: the melody pauses instead.
+  - id: kettle_melody
+    mode: single
+    parameters:
+      m: int
+    then:
+      - lambda: |-
+          id(melody_sel) = m >= 0 ? m : 1 + (int) (random_uint32() % (KETTLE_MELODY_COUNT - 1));
+          id(melody_pos) = 0;
+          ESP_LOGI("kettle", "Melody: %s", KETTLE_MELODIES[id(melody_sel)].name);
+      - while:
+          condition:
+            lambda: |-
+              return id(kettle_valid) &&
+                     kettle_melody_chunk(id(melody_sel), id(melody_pos), id(melody_cmd), id(melody_ms));
+          then:
+            - wait_until:
+                condition:
+                  lambda: "return !id(esp_pressing);"
+                timeout: 3s
+            - lambda: "id(melody_t0) = millis();"
+            - if:
+                condition:
+                  lambda: "return !id(melody_cmd).empty() && !id(esp_pressing);"
+                then:
+                  - http_request.get:
+                      url: !lambda 'return "http://" + id(kettle_ip).state + "/cli?cmd=" + id(melody_cmd);'
+            # Next chunk when this one has played. The kettle started it about half a request time after
+            # t0; the 30 ms margin keeps a faster next request from arriving while it still plays.
+            - delay: !lambda |-
+                const uint32_t elapsed = millis() - id(melody_t0);
+                ESP_LOGD("kettle", "%s (%d ms), request took %u ms", id(melody_cmd).c_str(), id(melody_ms), (unsigned) elapsed);
+                const uint32_t wait = id(melody_ms) + 30;
+                return elapsed < wait ? wait - elapsed : 0;
+
+  - id: on_kettle_started
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_on: kettle_sync
+              - binary_sensor.is_off: powered
+          then:
+            - logger.log: "Kettle started -> Flair on"
+            - homeassistant.event:
+                event: esphome.espresso_sync
+                data: {action: flair_on_by_kettle}
+            - script.execute: {id: toggle_verified, want_on: true}
+
+  - id: on_kettle_stopped
+    mode: restart
+    then:
+      - delay: 2s                # lift and base flags settle
+      - if:
+          condition:
+            lambda: |-
+              return id(kettle_sync).state && id(powered).state && id(kettle_valid) &&
+                     !id(kettle_heating).state && id(kettle_on_base).state;
+          then:
+            - logger.log: "Kettle stopped on its base -> Flair off"
+            - homeassistant.event:
+                event: esphome.espresso_sync
+                data: {action: flair_off_by_kettle}
+            - script.execute: power_off
+
+  - id: on_flair_started
+    mode: single
+    then:
+      # Let "Start on HIGH" (main config) send its presses first.
+      - wait_until:
+          condition:
+            lambda: "return !id(esp_pressing) && !id(real_button).state;"
+          timeout: 6s
+      - delay: 300ms
+      - script.wait: start_high_after_on
+      - if:
+          condition:
+            lambda: |-
+              return id(kettle_sync).state && id(kettle_valid) && !id(kettle_heating).state &&
+                     id(kettle_on_base).state && !id(kettle_no_water);
+          then:
+            - logger.log: "Flair on -> kettle heats"
+            - homeassistant.event:
+                event: esphome.espresso_sync
+                data: {action: kettle_on_by_flair}
+            - script.execute:
+                id: kettle_cli
+                cmd: !lambda 'return "setsetting settempr " + to_string((int) lroundf(id(kettle_target).state * 1.8f + 32.0f));'
+            - script.wait: kettle_cli
+            - script.execute: {id: kettle_cli, cmd: "setstate S_Heat"}
