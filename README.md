@@ -89,15 +89,25 @@ Measured on board HL-01-V2.2 (2024-08-14). Details and component list: [docs/har
 
 ## Parts
 
+### Required
+
 | Part | Notes |
 |---|---|
 | ESP32-C3 board, ideally with external antenna | reference: DIYMall ESP32-C3 MINI V1. A C3 SuperMini fits too; its PCB antenna is weak. Needs 3 free ADC1 pins |
 | MOSFET for the button | reference: D4184 module. Smaller alternative: 2N7002 or BSS138 with 100 kΩ gate → GND (untested here) |
-| Buck 24 V → 5 V, ≥ 30 V input rating | Pololu D24V5F5 (5.1–36 V) or Traco TSR 0.5-2450 (6.5–32 V). Mini-360 is rated 23 V max, MP1584 28 V |
-| Electrolytic ≥ 33 µF / ≥ 50 V | at the buck input, against plug-in spikes |
-| Polyfuse 250–500 mA, V_max ≥ 30 V | in the 24 V tap. Many 1206 polyfuses are rated 6–16 V only |
-| Resistors | 100 kΩ for the button read; 3 × 10 kΩ for the LED lines (recommended, untested here) |
+| 5 V supply for the ESP | a USB power supply (what the reference build uses today) or a buck from the Flair's 24 V (parts below) |
 | Silicone wire 26–28 AWG, heat-shrink, Kapton tape | it gets warm inside the housing |
+
+### Optional
+
+| Part | For |
+|---|---|
+| 100 kΩ resistor | real-button read: one click while off = on, click counting for the kettle melody |
+| 3 × 10 kΩ resistors | protection in the LED lines against a slip of the soldering iron (untested here) |
+| Buck 24 V → 5 V, ≥ 30 V input rating | ESP powered from the Flair's 24 V, one common supply. Pololu D24V5F5 (5.1–36 V) or Traco TSR 0.5-2450 (6.5–32 V); Mini-360 is rated 23 V max, MP1584 28 V |
+| + electrolytic ≥ 33 µF / ≥ 50 V | with the buck: at its input, against plug-in spikes |
+| + polyfuse 250–500 mA, V_max ≥ 30 V | with the buck: in the 24 V tap. Many 1206 polyfuses are rated 6–16 V only |
+| JST-PH/XH connector pair | ESP unpluggable for flashing |
 
 ## Wiring
 
