@@ -61,7 +61,12 @@ revisions and kettle firmware versions included: [docs/ideas.md](docs/ideas.md#o
 
 ## The board in short
 
-Measured on board HL-01-V2.2 (2024-08-14). Details, component list and photos: [docs/hardware.md](docs/hardware.md).
+Measured on board HL-01-V2.2 (2024-08-14). Details and component list: [docs/hardware.md](docs/hardware.md).
+
+<p>
+  <a href="photos/board-front.jpg"><img src="photos/board-front.jpg" width="49%" alt="Front of the Flair 58 control board HL-01-V2.2 in the lower housing: button S1, LEDs D2-D4, harness to the brew head"></a>
+  <a href="photos/board-back.jpg"><img src="photos/board-back.jpg" width="49%" alt="Back of the control board: MCU U2, heater MOSFET Q6, buzzer, CON2 header, NTC and HOT pads"></a>
+</p>
 
 | Topic | Finding |
 |---|---|
@@ -96,7 +101,7 @@ Measured on board HL-01-V2.2 (2024-08-14). Details, component list and photos: [
 
 ## Wiring
 
-Photos of the board: [front](photos/board-front.jpg) · [back](photos/board-back.jpg).
+Board photos: [The board in short](#the-board-in-short).
 
 ### Button press (MOSFET)
 
