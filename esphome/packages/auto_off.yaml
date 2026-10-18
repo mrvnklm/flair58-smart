@@ -10,8 +10,17 @@
 # Caveat: anything else that cools the head after Ready (a preheat flush, a cold cylinder) counts as
 # a shot too. That is why it is opt-in.
 #
+# Fallback (needs the kettle package, switch "Auto off fallback", off by default): water poured while the Flair
+# still heats gives no reheat after Ready, so the shot is never seen (2 of 3 shots on one day in the reference
+# build). If a hot kettle (>= 85 °C) was lifted <= 180 s before Ready, the Flair goes off once Ready has held
+# "Auto off fallback after" seconds (150) without a break. Every new Ready restarts the count, any kettle lift
+# disarms it (that pour is the shot, the reheat path takes over). The temperature filter drops refilling the
+# kettle with cold water. In the reference build's logs the tightest case was 74 s from Ready to the next pour;
+# 90 s was reported as too early once, hence 150 s.
+#
 # Needs from the main config: binary_sensors `powered` / `heating` / `ready` / `real_button`,
-# script `power_off`, globals `esp_pressing` / `shot_off_ms`.
+# script `power_off`, globals `esp_pressing` / `shot_off_ms` / `kettle_lift_count` / `kettle_hot_lift_ms`
+# (the last two are only ever set by the kettle package; without it the fallback never arms).
 
 globals:
   - id: was_ready              # Ready seen since the Flair was switched on
@@ -20,11 +29,23 @@ globals:
   - id: last_press_ms          # millis() of the last press (ours or the real button)
     type: uint32_t
     initial_value: "0"
+  - id: fallback_armed         # a hot pour came <= 180 s before a Ready; cleared by the next lift / Flair off
+    type: bool
+    initial_value: "false"
+  - id: seen_lift_count        # kettle_lift_count already handled
+    type: uint32_t
+    initial_value: "0"
 
 switch:
   - platform: template
     name: Auto off after shot
     id: auto_off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    name: Auto off fallback
+    id: auto_off_fallback
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
 
@@ -42,6 +63,19 @@ number:
     restore_value: true
     initial_value: 25          # seconds from the first reheat after Ready to off
 
+  - platform: template
+    name: Auto off fallback after
+    id: auto_off_fallback_delay
+    entity_category: config
+    unit_of_measurement: s
+    mode: box
+    min_value: 30
+    max_value: 900
+    step: 10
+    optimistic: true
+    restore_value: true
+    initial_value: 150         # Ready held this long after a pour before Ready -> off
+
 binary_sensor:
   - platform: template
     id: any_press
@@ -55,7 +89,25 @@ binary_sensor:
     internal: true
     lambda: "return id(ready).state;"
     on_press:
-      - lambda: "id(was_ready) = true;"
+      - lambda: |-
+          id(was_ready) = true;
+          if (id(kettle_hot_lift_ms) != 0 && millis() - id(kettle_hot_lift_ms) <= 180000) id(fallback_armed) = true;
+      - if:
+          condition:
+            lambda: "return id(fallback_armed);"
+          then:
+            - script.execute: auto_off_fallback_run   # restart: counts from this Ready
+    on_release:
+      - script.stop: auto_off_fallback_run     # Ready broke: the count starts again at the next Ready
+
+  # Any kettle lift (counted by the kettle package): a new pour, the shot is still to come.
+  - platform: template
+    id: kettle_lift_seen
+    internal: true
+    lambda: "return id(kettle_lift_count) != id(seen_lift_count);"
+    on_press:
+      - lambda: "id(seen_lift_count) = id(kettle_lift_count); id(fallback_armed) = false;"
+      - script.stop: auto_off_fallback_run
 
   - platform: template
     id: reheat_edge
@@ -73,8 +125,9 @@ binary_sensor:
     internal: true
     lambda: "return id(powered).state;"
     on_release:
-      - lambda: "id(was_ready) = false;"
+      - lambda: "id(was_ready) = false; id(kettle_hot_lift_ms) = 0; id(fallback_armed) = false;"
       - script.stop: auto_off_check
+      - script.stop: auto_off_fallback_run
 
 script:
   - id: auto_off_check
@@ -90,4 +143,22 @@ script:
                 event: esphome.espresso_sync
                 data: {action: flair_off_after_shot}
             - lambda: "id(shot_off_ms) = millis() | 1;"   # never 0; the kettle package plays its jingle on this
+            - script.execute: power_off
+
+  - id: auto_off_fallback_run
+    mode: restart
+    then:
+      - delay: !lambda "return (uint32_t) (id(auto_off_fallback_delay).state * 1000);"
+      - if:
+          condition:
+            # Still Ready (no reheat in the meantime) and the reheat path is not counting down already.
+            lambda: |-
+              return id(auto_off).state && id(auto_off_fallback).state && id(powered).state && id(ready).state &&
+                     !id(auto_off_check).is_running();
+          then:
+            - logger.log: "Water in before Ready, no reheat + fallback delay -> Flair off"
+            - homeassistant.event:
+                event: esphome.espresso_sync
+                data: {action: flair_off_fallback}
+            - lambda: "id(shot_off_ms) = millis() | 1;"   # the kettle package goes off and plays its jingle on this
             - script.execute: power_off

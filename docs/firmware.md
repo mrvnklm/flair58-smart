@@ -19,7 +19,7 @@ on its own; the packages talk to it only through a few globals and scripts liste
 | Entity | Rule |
 |---|---|
 | `LED n` | ADC every 100 ms, hysteresis 1.2 V on / 0.6 V off |
-| `Powered` | any LED lit or blinking (blink gaps bridged for 1.2 s) |
+| `Powered` | any LED lit or blinking (blink gaps bridged for 1.2 s); left and middle LED going dark together on MEDIUM/HIGH = off after 250 ms (the left LED only blinks on LOW) |
 | `Heating` | an LED changed state twice within 1.2 s, and the last change is recent |
 | `Ready` | powered and not heating for 3 s |
 | `Preset index` / `Preset` | highest active LED: 1 = LOW, 2 = MEDIUM, 3 = HIGH |
@@ -31,10 +31,12 @@ S1 only **toggles**, and the ESP only knows the power state from the LEDs. A wro
 an "on". So:
 
 - Every press goes through one queued script, so a short press never cuts into a long one.
-- Every power change goes through `toggle_verified`: re-check the state right before pressing, never toggle within
-  3 s of a long press, verify via the LEDs 4 s later. On failure it logs a warning and fires
-  `esphome.flair_toggle_unconfirmed`.
-- Automatic offs (safety, kettle, auto off) retry up to 3 times.
+- Every power change goes through `toggle_verified`: never two long presses within 3 s (a request in that window
+  waits), re-check the state right before pressing, then wait up to 3 s for the LEDs to agree. On failure it logs a
+  warning and fires `esphome.flair_toggle_unconfirmed`.
+- A click on the real button stops a running toggle and starts its own, so it is never dropped. A click within
+  2.5 s of a start click is ignored (the LEDs light ~1.3 s after it).
+- Automatic offs (safety, kettle, auto off, click, `Power` switch) retry up to 3 times.
 - The `Power` switch never acts at boot (`restore_mode: DISABLED`).
 
 ## Behaviour
@@ -42,21 +44,25 @@ an "on". So:
 | Trigger | Action | Switch (default) |
 |---|---|---|
 | Powered for 45 min | Flair off, independent of all switches and of HA | – |
-| Flair switched on (after ≥ 2 s off, not in the first 15 s after boot) | wait for the release, 100 ms, two short presses → HIGH | `Start on HIGH` (off) |
+| Flair switched on (after ≥ 2 s off, not in the first 15 s after boot) | wait for the release, 100 ms, then short presses one at a time until the right LED lights; each press must light the next LED within 1 s, at most 3 presses. Needed a retry or missed HIGH: event `start_high_retry` | `Start on HIGH` (off) |
 | One short press on the real button while off | Flair on | `Short press starts` (on) |
+| One short press on the real button while on | Flair off (the Flair steps one preset first, then the ESP's long press switches it off) | `Short press stops` (off) |
 | **Kettle package** | | |
 | Kettle starts heating, Flair off | Flair on | `Kettle sync` (on) |
-| Flair switched on, kettle on its base, has water, not heating | kettle target set, kettle heats | `Kettle sync` |
-| Kettle stops heating and is still on its base after 2 s | Flair off | `Kettle sync` |
+| Flair switched on, kettle on its base, has water, not heating | kettle target set, kettle heats (after Start on HIGH) | `Kettle sync` |
+| Kettle stops heating and is still on its base after 2 s | Flair off; not if the stop came from our own `S_Off` | `Kettle sync` |
+| The ESP switches the Flair off (any of its own off presses) | kettle off right after the press | `Kettle sync` |
 | Kettle back on its base after a lift (`S_STANDBY` → `S_HEAT`) | nothing: a resume, not a start | – |
-| Flair goes off (any cause), kettle not off, Flair still off after 2 s | kettle off | `Kettle sync` |
-| ≥ 3 short presses on the real button while off | random melody on the kettle buzzer | `Melody on triple press` (on) |
-| Auto off fired (needs both packages) | 1 s jingle on the kettle; the kettle then goes off through the Flair-off row | `Auto off jingle` (on) |
+| Flair goes off (any cause), kettle not off, Flair still off after 2 s and one fresh poll | kettle off | `Kettle sync` |
+| Kettle heats after our own `S_Heat` | nothing: not a kettle start | – |
+| ≥ 2 short presses on the real button while off | random melody on the kettle buzzer | `Melody on double press` (on) |
+| Auto off fired (needs both packages) | kettle off together with the Flair, then a 1 s jingle | `Auto off jingle` (on) |
 | **Auto off package** | | |
 | First reheat after Ready, not within 20 s of any press | `Auto off after` s later (25): Flair off | `Auto off after shot` (off) |
+| Hot kettle (≥ 85 °C) lifted ≤ 180 s before Ready, then no further lift and no reheat (needs the kettle package) | Ready held `Auto off fallback after` s (150) without a break: Flair off. Every new Ready restarts the count, any lift disarms it | `Auto off fallback` (off) |
 
 Typical timings (reference build): kettle on → Flair on 1.5–3.5 s · kettle off → Flair off 4–10 s ·
-short press → HIGH 1.65 s after release.
+short press → HIGH 1.65 s after release · ESP switches the Flair off → kettle off within ~1 s.
 
 ## Home Assistant interface
 
@@ -65,8 +71,8 @@ short press → HIGH 1.65 s after release.
 | Controls | `Power`, `Preset`, `Power toggle`, `Next preset`, `Restart`; kettle: `Play kettle melody` |
 | State | `Powered`, `Heating`, `Ready`, `Status`, `Preset index`, `Button`, `LED 1–3`; kettle: `Kettle mode`, `Kettle heating`, `Kettle on base`, `Kettle temperature`, `Kettle reachable` |
 | Switches | see the behaviour table |
-| Config | `Long press`, `Short press`, `Press gap`; kettle: `Kettle IP`, `Kettle target`; auto off: `Auto off after` |
-| Diagnostics | `LED n voltage`, `Button line (raw)`, `Wi-Fi signal` |
+| Config | `Long press`, `Short press`, `Press gap`; kettle: `Kettle IP`, `Kettle target`; auto off: `Auto off after`, `Auto off fallback after` |
+| Diagnostics | `LED n voltage`, `Button line (raw)`, `Wi-Fi signal`, `Blink gap max` (longest dark phase of a blinking LED since power-on; to size `blink_window_ms`, reference build: 800 ms) |
 | Events | `esphome.flair_button` (`type`: `short_press` / `long_press`, `machine`), `esphome.espresso_sync` (`action`), `esphome.flair_toggle_unconfirmed` (`wanted`) |
 
 With `friendly_name: Flair 58`, entity IDs come out as `switch.flair_58_power`, `binary_sensor.flair_58_ready`,

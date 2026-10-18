@@ -102,6 +102,30 @@ globals:
   - id: shot_off_ms            # millis() of the last auto off after a shot (set by packages/auto_off.yaml)
     type: uint32_t
     initial_value: "0"
+  - id: flair_off_press_ms     # millis() of our own off press (toggle_verified); the kettle package switches off on it
+    type: uint32_t
+    initial_value: "0"
+  - id: kettle_lift_count      # kettle lifts while the Flair is on (kettle package -> auto off fallback)
+    type: uint32_t
+    initial_value: "0"
+  - id: kettle_hot_lift_ms     # millis() of the last hot (>= 85 °C) kettle lift while the Flair is on, 0 = none
+    type: uint32_t
+    initial_value: "0"
+  - id: blink_gap_max          # longest dark phase of a blinking LED since power-on, ms (diagnostic)
+    type: uint32_t
+    initial_value: "0"
+  - id: start_click_ms         # millis() of the last click that switched the Flair on
+    type: uint32_t
+    initial_value: "0"
+  - id: high_press_ms          # millis() of the last press on the way to HIGH (start_high_after_on)
+    type: uint32_t
+    initial_value: "0"
+  - id: high_presses           # presses sent on the way to HIGH
+    type: int
+    initial_value: "0"
+  - id: high_next_led          # LED the current press must light: 2 (from LOW) or 3 (from MEDIUM)
+    type: int
+    initial_value: "0"
   - id: led_1_prev_toggle
     type: uint32_t
     initial_value: "0"
@@ -164,15 +188,28 @@ script:
     parameters:
       want_on: bool
     then:
-      # S1 only toggles. Re-check right before pressing, and never toggle within 3 s of a long press:
-      # "Powered" lags 1.2 s behind an off (blink bridging), so a stale request would switch it back on.
+      # S1 only toggles. Never two long presses within 3 s ("Powered" lags behind an off, a stale request would
+      # switch it back on). A request inside that window waits for it instead of being dropped, then re-checks the
+      # state right before pressing.
+      - wait_until:
+          condition:
+            lambda: "return millis() - id(last_long_press_ms) > 3000;"
+          timeout: 3s
       - if:
           condition:
-            lambda: "return id(powered).state != want_on && millis() - id(last_long_press_ms) > 3000;"
+            lambda: "return id(powered).state != want_on;"
           then:
             - script.execute: press_long
             - script.wait: press_long
-            - delay: 4s              # LED blink bridging needs ~1.5 s to settle
+            # Hook for the kettle package: kettle off right after our off press instead of waiting for the
+            # Flair-off edge (blink bridging + settle + a fresh poll took 5-7 s).
+            - lambda: "if (!want_on) id(flair_off_press_ms) = millis() | 1;"
+            # Confirmed as soon as the LEDs agree (on: at once, off: 0.25 s, on LOW up to the blink window). Only a
+            # real miss waits the full 3 s, so a retry by power_off comes after every "Powered" lag.
+            - wait_until:
+                condition:
+                  lambda: "return id(powered).state == want_on;"
+                timeout: 3s
             - if:
                 condition:
                   lambda: "return id(powered).state != want_on;"
@@ -186,7 +223,7 @@ script:
                       data:
                         wanted: !lambda 'return want_on ? "on" : "off";'
           else:
-            - logger.log: "Toggle skipped: already in the wanted state or a long press just happened"
+            - logger.log: "Toggle skipped: already in the wanted state"
 
   # Switch off with retries: toggle_verified may be busy (mode single drops the call) or the press
   # may not register. Used by every automatic off (safety, auto off, kettle off).
@@ -230,6 +267,11 @@ script:
   # The Flair always starts on LOW. Two short presses = HIGH. The LEDs come on while the long press is
   # still held (ours or the real button); a short press sent then merges into it and is lost, so wait
   # for the release first.
+  # One press at a time, each checked at the LEDs: the press must light the next LED (middle from LOW, right
+  # from MEDIUM) within 1 s, else it is sent again. Once both blind presses were lost and the Flair stayed on
+  # LOW. A blink edge of the middle LED does not count (it would end the wait before the right LED shows, and a
+  # third press would go HIGH -> LOW). Stops while the right LED is lit or bridged (led_3_active), so its blink
+  # gap never reads as "not HIGH". At most 3 presses (2 + 1 retry). Switching off stops this script.
   - id: start_high_after_on
     mode: single
     then:
@@ -242,12 +284,45 @@ script:
             switch.is_on: start_high
           then:
             - delay: 100ms
-            - script.execute: {id: press_n, n: 2}
-            - script.wait: press_n
+            - lambda: "id(high_presses) = 0;"
+            - while:
+                condition:
+                  lambda: "return id(powered).state && !id(led_3_active).state && id(high_presses) < 3;"
+                then:
+                  - lambda: |-
+                      id(high_press_ms) = millis();
+                      id(high_presses)++;
+                      id(high_next_led) = id(led_2_active).state ? 3 : 2;   // middle LED lit or blinking = MEDIUM
+                  - script.execute: press_short
+                  - script.wait: press_short
+                  - wait_until:
+                      condition:
+                        lambda: |-
+                          const bool right = id(high_next_led) == 3;
+                          const bool lit = right ? id(led_3_raw).state : id(led_2_raw).state;
+                          const uint32_t t = right ? id(led_3_last_toggle) : id(led_2_last_toggle);
+                          return lit && (int32_t) (t - id(high_press_ms)) >= 0;
+                      timeout: 1s
+            - if:
+                condition:
+                  lambda: "return id(powered).state && (id(high_presses) > 2 || !id(led_3_active).state);"
+                then:
+                  - logger.log:
+                      level: WARN
+                      format: "Start on HIGH: %d presses, right LED %s"
+                      args: ['id(high_presses)', 'id(led_3_active).state ? "lit" : "dark"']
+                  - homeassistant.event:
+                      event: esphome.espresso_sync
+                      data:
+                        action: start_high_retry
+                        presses: !lambda "return to_string(id(high_presses));"
+                        reached: !lambda 'return id(led_3_active).state ? "yes" : "no";'
 
 # Clicks counted by button_clicks.h. A sequence ends 250 ms after the last release. The Flair ignores
 # short presses while it is off, so they are free to use: 1 click = Flair on; 2 or more are handed to
-# the packages through `button_multi_clicks` (the kettle package plays a melody on >= 3).
+# the packages through `button_multi_clicks` (the kettle package plays a melody on >= 2).
+# While on, 1 click = Flair off if "Short press stops" is on (for setups that only use one preset; the Flair
+# still steps one preset before our off press). More clicks while on: nothing, the Flair steps its presets.
 interval:
   - interval: 50ms
     then:
@@ -256,9 +331,28 @@ interval:
           const int n = button_clicks::take(250, timing);
           if (n == 0) return;
           ESP_LOGI("button", "%d click(s), Flair %s, ms: %s", n, id(powered).state ? "on" : "off", timing.c_str());
-          if (id(powered).state) return;
+          // A real click wins over a running toggle: toggle_verified (mode single) would drop it while it waits for
+          // the LEDs. The 3 s guard inside toggle_verified still prevents a second long press right after one.
+          if (id(powered).state) {
+            // The LEDs light ~1.3 s after a start click: a second click "because nothing happens" must not switch
+            // it off again.
+            if (n == 1 && millis() - id(start_click_ms) < 2500) {
+              ESP_LOGI("button", "Click right after a start click -> ignored");
+              return;
+            }
+            if (n == 1 && id(short_press_stop).state) {
+              ESP_LOGI("button", "Short press while on -> Flair off");
+              id(toggle_verified).stop();
+              id(power_off).stop();
+              id(power_off).execute();
+            }
+            return;
+          }
           if (n == 1 && id(short_press_start).state) {
             ESP_LOGI("button", "Short press while off -> Flair on");
+            id(power_off).stop();
+            id(toggle_verified).stop();
+            id(start_click_ms) = millis();
             id(toggle_verified).execute(true);
           } else if (n >= 2) {
             id(button_multi_clicks) = n;
@@ -286,6 +380,12 @@ switch:
     restore_mode: RESTORE_DEFAULT_ON
 
   - platform: template
+    name: Short press stops
+    id: short_press_stop
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF   # off = a short press while on steps the preset, as on the stock Flair
+
+  - platform: template
     name: Start on HIGH
     id: start_high
     optimistic: true
@@ -305,11 +405,9 @@ switch:
           then:
             - script.execute: {id: toggle_verified, want_on: true}
     turn_off_action:
-      - if:
-          condition:
-            binary_sensor.is_on: powered
-          then:
-            - script.execute: {id: toggle_verified, want_on: false}
+      # With retries (power_off): the kettle package switches the kettle off right after the first press, so a
+      # lost press must not leave the Flair on.
+      - script.execute: power_off
 
 # ---------------------------------------------------------------------------
 # Status LEDs (analog: 2.2 V is below the ESP32's guaranteed digital high)
@@ -371,6 +469,15 @@ sensor:
       if (id(led_1_active).state) return 1;
       return 0;
 
+  - platform: template
+    name: Blink gap max        # longest dark phase of a blinking LED this session; use it to size blink_window_ms.
+                               # An upper bound: a blocked loop (kettle request) delays the ADC sample of the on edge
+    unit_of_measurement: ms
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: "return (float) id(blink_gap_max);"
+
   - platform: wifi_signal
     name: Wi-Fi signal
     update_interval: 60s
@@ -426,7 +533,13 @@ binary_sensor:
       upper: ${led_on_v}
       lower: ${led_off_v}
     on_state:
-      - lambda: "id(led_1_prev_toggle) = id(led_1_last_toggle); id(led_1_last_toggle) = millis();"
+      - lambda: |-
+          const uint32_t now = millis();
+          // On edge after a dark phase < 4 s while powered = a blink gap (longer = preset change / power-on).
+          if (x && id(powered).state && id(led_1_last_toggle) != 0 && now - id(led_1_last_toggle) < 4000)
+            id(blink_gap_max) = std::max(id(blink_gap_max), now - id(led_1_last_toggle));
+          id(led_1_prev_toggle) = id(led_1_last_toggle);
+          id(led_1_last_toggle) = now;
 
   - platform: analog_threshold
     name: LED 2
@@ -436,7 +549,13 @@ binary_sensor:
       upper: ${led_on_v}
       lower: ${led_off_v}
     on_state:
-      - lambda: "id(led_2_prev_toggle) = id(led_2_last_toggle); id(led_2_last_toggle) = millis();"
+      - lambda: |-
+          const uint32_t now = millis();
+          // On edge after a dark phase < 4 s while powered = a blink gap (longer = preset change / power-on).
+          if (x && id(powered).state && id(led_2_last_toggle) != 0 && now - id(led_2_last_toggle) < 4000)
+            id(blink_gap_max) = std::max(id(blink_gap_max), now - id(led_2_last_toggle));
+          id(led_2_prev_toggle) = id(led_2_last_toggle);
+          id(led_2_last_toggle) = now;
 
   - platform: analog_threshold
     name: LED 3
@@ -446,7 +565,13 @@ binary_sensor:
       upper: ${led_on_v}
       lower: ${led_off_v}
     on_state:
-      - lambda: "id(led_3_prev_toggle) = id(led_3_last_toggle); id(led_3_last_toggle) = millis();"
+      - lambda: |-
+          const uint32_t now = millis();
+          // On edge after a dark phase < 4 s while powered = a blink gap (longer = preset change / power-on).
+          if (x && id(powered).state && id(led_3_last_toggle) != 0 && now - id(led_3_last_toggle) < 4000)
+            id(blink_gap_max) = std::max(id(blink_gap_max), now - id(led_3_last_toggle));
+          id(led_3_prev_toggle) = id(led_3_last_toggle);
+          id(led_3_last_toggle) = now;
 
   # "Active" = lit or blinking (blink gaps bridged)
   - platform: template
@@ -473,9 +598,21 @@ binary_sensor:
   - platform: template
     name: Powered
     id: powered
+    # Fast off: the left LED is solid on MEDIUM and HIGH and only blinks while heating on LOW (reference board: no
+    # dark phase in 675 blinks on HIGH). Left and middle LED going dark together (within 300 ms) after a long lit
+    # phase of the left one (> 2 s; a LOW heating blink is lit ~0.8 s) = off, after 250 ms (2-3 ADC samples)
+    # instead of the blink window. Not on a step to LOW (the middle LED goes dark first, then a cold head blinks
+    # the left one), not from MEDIUM while its LED was in a dark phase, not on LOW: there the window still applies.
     lambda: |-
+      const uint32_t now = millis();
+      if (id(led_1_raw).state) return true;
+      const int32_t apart = (int32_t) (id(led_1_last_toggle) - id(led_2_last_toggle));
+      if (!id(led_2_raw).state && apart > -300 && apart < 300 &&
+          id(led_1_last_toggle) - id(led_1_prev_toggle) > 2000)
+        return now - id(led_1_last_toggle) < 250;
       return id(led_1_active).state || id(led_2_active).state || id(led_3_active).state;
     on_press:
+      - lambda: "id(blink_gap_max) = 0;"
       - script.execute: safety_off
       # Decided once here; the kettle package reads the same flag. Not at boot (LEDs are sampled for the
       # first time), and only after >= 2 s off (blink gaps are not an off).
@@ -487,6 +624,7 @@ binary_sensor:
             - script.execute: start_high_after_on
     on_release:
       - script.stop: safety_off
+      - script.stop: start_high_after_on   # switched off during the start sequence: no more presses
       - lambda: "id(flair_off_since) = millis();"
 
   # Blinking LED = still heating (Flair manual); all LEDs of the bar solid = temperature reached.

@@ -1,7 +1,7 @@
 #pragma once
 // Melodies for the kettle buzzer (CLI `buz <freq_hz> <duty_13bit> <dur_ms>`), played by the script
 // `kettle_melody` in packages/kettle_wifi.yaml. Entry 0 is the auto-off jingle, the rest are the
-// triple-press jokes (picked at random). All public domain.
+// double-press jokes (picked at random). All public domain.
 //
 // Notes: "<letter>[#|b]<octave>:<units>", "R:<units>" = rest; one unit = unit_ms. Octave 4 still sounds,
 // octave 5 is the buzzer's best range.

@@ -7,7 +7,8 @@ Reports from other machines and kettles are welcome as issues.
 | Point | How to close it |
 |---|---|
 | Other board revisions than HL-01-V2.2 | photos of the board and the S1/LED measurements from [hardware.md](hardware.md) |
-| Auto-off jingle in a real shot; ESP-side "Flair off → kettle off"; triple-press melody in 3-tone chunks | implemented, not yet observed at the machine |
+| Auto-off jingle in a real shot; double-press melody in 3-tone chunks; auto-off fallback in a real shot | implemented, not yet observed at the machine |
+| `blink_window_ms` (1200 ms) closer to the measured blink gap | read `Blink gap max` over a few sessions, then set it to the maximum plus a margin |
 | 10 kΩ in the LED lines | the reference build reads the LEDs directly |
 | Button-read divider (100 kΩ + 150–220 kΩ to GND) | the reference build uses 100 kΩ only; measure the idle level |
 | HA-side coupling (`kettle_coupling_ha.yaml`) with a 1.2.x kettle over BLE | the "Flair off → kettle off" automation never ran; no lift/resume guard like the ESP has |

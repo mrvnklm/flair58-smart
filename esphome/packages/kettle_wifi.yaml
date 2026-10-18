@@ -9,15 +9,16 @@
 #   Flair switched on              -> (Start on HIGH, main config) -> kettle heats to "Kettle target"
 #   Kettle stops heating, on base  -> Flair off (2 s settle: lift/base flags arrive with a delay)
 #   Kettle back on its base after a lift (S_STANDBY -> S_HEAT) -> nothing: a resume, not a start
+#   We switch the Flair off        -> kettle off right after the off press
 #   Flair goes off (any cause)     -> kettle off
-#   Auto off after the shot        -> 1 s jingle on the kettle first ("Auto off jingle")
-#   >= 3 short presses, Flair off  -> random melody on the kettle buzzer ("Melody on triple press")
+#   Auto off after the shot        -> kettle off together with the Flair, then a 1 s jingle ("Auto off jingle")
+#   >= 2 short presses, Flair off  -> random melody on the kettle buzzer ("Melody on double press")
 #
 # Set the kettle's IP in HA (entity "Kettle IP"); give the kettle a fixed DHCP lease. Empty = coupling idle.
 #
 # Needs from the main config: binary_sensors `powered` / `real_button`, scripts `toggle_verified` /
 # `power_off` / `start_high_after_on`, globals `esp_pressing` / `flair_start_ok` / `button_multi_clicks` /
-# `shot_off_ms`. HTTP requests block the main loop (~150-470 ms), so they never run while a button press is
+# `shot_off_ms` / `flair_off_press_ms` / `kettle_lift_count` / `kettle_hot_lift_ms`. HTTP requests block the main loop (~150-470 ms), so they never run while a button press is
 # held - a stretched short press could turn into an on/off long press.
 
 esphome:
@@ -65,6 +66,18 @@ globals:
   - id: kettle_prev_mode       # base mode (suffix like "+TSET" cut off) of the previous valid poll
     type: std::string
     initial_value: '""'
+  - id: kettle_poll_seq        # counts valid polls, so a script can wait for fresh kettle state
+    type: uint32_t
+    initial_value: "0"
+  - id: flair_stop_seq         # kettle_poll_seq when on_flair_stopped started waiting
+    type: uint32_t
+    initial_value: "0"
+  - id: kettle_heat_by_us_ms   # millis() of our own `setstate S_Heat`, 0 = none pending
+    type: uint32_t
+    initial_value: "0"
+  - id: kettle_off_by_us_ms    # millis() of our own `setstate S_Off`, 0 = none
+    type: uint32_t
+    initial_value: "0"
 
 text:
   - platform: template
@@ -105,8 +118,8 @@ switch:
     restore_mode: RESTORE_DEFAULT_ON
 
   - platform: template
-    name: Melody on triple press
-    id: melody_triple
+    name: Melody on double press
+    id: melody_double
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
 
@@ -151,6 +164,26 @@ binary_sensor:
       - lambda: "id(shot_off_ms) = 0;"   # consumed; otherwise millis() wrap-around would fire it again
       - script.execute: kettle_auto_off_jingle
 
+  # Our own off press (main config, toggle_verified) -> kettle off at once.
+  - platform: template
+    id: flair_off_press_edge
+    internal: true
+    lambda: "return id(flair_off_press_ms) != 0 && millis() - id(flair_off_press_ms) < 3000;"
+    on_press:
+      - lambda: "id(flair_off_press_ms) = 0;"   # consumed
+      - script.execute: kettle_off_now
+
+  # Kettle lifted while the Flair is on -> hooks for the auto off fallback (packages/auto_off.yaml).
+  - platform: template
+    id: kettle_lift_edge
+    internal: true
+    lambda: "return id(powered).state && id(kettle_valid) && !id(kettle_on_base).state;"
+    on_press:
+      - lambda: |-
+          // Only a hot kettle pours; a cold one is being refilled.
+          if (!isnan(id(kettle_temp).state) && id(kettle_temp).state >= 85.0f) id(kettle_hot_lift_ms) = millis() | 1;
+          id(kettle_lift_count)++;
+
   - platform: template
     name: Kettle reachable
     id: kettle_reachable
@@ -169,6 +202,7 @@ binary_sensor:
           then:
             - script.execute: on_flair_started
     on_release:
+      - script.stop: on_flair_started   # switched off during the start sequence: no kettle start
       - if:
           condition:
             lambda: "return millis() > 15000;"
@@ -176,15 +210,15 @@ binary_sensor:
             - script.execute: on_flair_stopped
 
 interval:
-  # Click sequences from the main config (button_clicks.h). >= 3: a fast triple tap can arrive as 4 clicks.
+  # Click sequences from the main config (button_clicks.h). >= 2: a fast tap can arrive as one extra click.
   - interval: 50ms
     then:
       - lambda: |-
           const int n = id(button_multi_clicks);
           if (n == 0) return;
           id(button_multi_clicks) = 0;
-          if (n >= 3 && !id(powered).state && id(melody_triple).state) {
-            ESP_LOGI("button", "Triple press while off -> kettle melody");
+          if (n >= 2 && !id(powered).state && id(melody_double).state) {
+            ESP_LOGI("button", "Double press while off -> kettle melody");
             id(kettle_melody).execute(-1);
           }
 
@@ -239,14 +273,25 @@ interval:
                           // S_STANDBY = lifted while on. Back on the base it resumes S_HEAT by itself - that is
                           // not a start (it would switch the Flair back on after auto off). Lifted while off
                           // stays S_OFF, so filling the kettle and switching it on still counts.
+                          // Our own S_Heat (Flair on -> kettle heats) is not a kettle start either. A melody pauses
+                          // this poll, so the edge can arrive seconds later, after the Flair was switched off again.
+                          const bool ours = id(kettle_heat_by_us_ms) != 0 && millis() - id(kettle_heat_by_us_ms) < 60000;
+                          if (heating) id(kettle_heat_by_us_ms) = 0;
                           if (heating && id(kettle_prev_mode) == "S_STANDBY")
                             ESP_LOGI("kettle", "Kettle back on the base, resumes heating -> no Flair on");
+                          else if (heating && ours)
+                            ESP_LOGI("kettle", "Kettle heats after our own S_Heat -> no Flair on");
                           else if (heating) id(on_kettle_started).execute();
+                          // Our own S_Off (Flair off -> kettle off) is not a kettle stop either: its edge can arrive
+                          // after the Flair was switched on again.
+                          else if (id(kettle_off_by_us_ms) != 0 && millis() - id(kettle_off_by_us_ms) < 15000)
+                          { ESP_LOGI("kettle", "Kettle stopped after our own S_Off -> no Flair off"); id(kettle_off_by_us_ms) = 0; }
                           else id(on_kettle_stopped).execute();
                         }
                         id(kettle_was_heating) = heating;
                         id(kettle_prev_mode) = base_mode;
                         id(kettle_valid) = true;
+                        id(kettle_poll_seq)++;
                 on_error:
                   then:
                     - lambda: |-
@@ -269,6 +314,14 @@ script:
             - logger.log:
                 format: "Kettle CLI: %s"
                 args: ["cmd.c_str()"]
+            # Only a heating kettle gives a stop edge to swallow; an already-off kettle would leave the mark standing.
+            # Our S_Off also ends a pending own S_Heat: its edge never comes, and the mark would swallow a manual
+            # kettle start within 60 s.
+            - lambda: |-
+                if (cmd.rfind("setstate S_Off", 0) == 0) {
+                  id(kettle_heat_by_us_ms) = 0;
+                  if (id(kettle_heating).state) id(kettle_off_by_us_ms) = millis();
+                }
             - http_request.get:
                 url: !lambda |-
                   // The kettle's web server decodes "+" but not "%20".
@@ -281,16 +334,41 @@ script:
                 format: "Kettle CLI skipped (press still held): %s"
                 args: ["cmd.c_str()"]
 
-  # Auto off after the shot (packages/auto_off.yaml). The kettle itself goes off through on_flair_stopped,
-  # which waits for this jingle.
+  # Auto off after the shot (packages/auto_off.yaml): kettle off together with the Flair (kettle_cli waits for
+  # the release of the power press), then the jingle - `buz` also beeps in S_OFF.
   - id: kettle_auto_off_jingle
     mode: single
     then:
       - if:
           condition:
+            lambda: "return id(kettle_sync).state && id(kettle_valid);"
+          then:
+            - logger.log: "Auto off -> kettle off"
+            - script.execute: {id: kettle_cli, cmd: "setstate S_Off"}
+            - script.wait: kettle_cli
+      - if:
+          condition:
             lambda: "return id(kettle_sync).state && id(kettle_valid) && id(auto_off_jingle).state;"
           then:
             - script.execute: {id: kettle_melody, m: !lambda "return KETTLE_MELODY_JINGLE;"}
+
+  # Our own off press (main config) -> kettle off with the Flair. The mode can be stale during a melody;
+  # on_flair_stopped below still checks with a fresh poll.
+  - id: kettle_off_now
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(kettle_sync).state && id(kettle_valid) && !id(kettle_auto_off_jingle).is_running() &&
+                     id(kettle_mode).state.rfind("S_OFF", 0) != 0 &&
+                     !(id(kettle_off_by_us_ms) != 0 && millis() - id(kettle_off_by_us_ms) < 3000);   // just sent
+          then:
+            - logger.log: "Flair off by us -> kettle off"
+            - homeassistant.event:
+                event: esphome.espresso_sync
+                data: {action: kettle_off_with_flair}
+            - script.execute: {id: kettle_cli, cmd: "setstate S_Off"}
 
   # Flair off -> kettle off. 2 s settle, then only if the Flair is still off.
   - id: on_flair_stopped
@@ -298,6 +376,13 @@ script:
     then:
       - delay: 2s
       - script.wait: kettle_melody   # let the auto-off jingle finish first
+      # The poll pauses during a melody, so kettle_mode can be stale (still S_OFF right after our S_Heat):
+      # wait for one fresh poll before deciding.
+      - lambda: "id(flair_stop_seq) = id(kettle_poll_seq);"
+      - wait_until:
+          condition:
+            lambda: "return id(kettle_poll_seq) != id(flair_stop_seq);"
+          timeout: 5s
       - if:
           condition:
             lambda: |-
@@ -389,7 +474,7 @@ script:
       - if:
           condition:
             lambda: |-
-              return id(kettle_sync).state && id(kettle_valid) && !id(kettle_heating).state &&
+              return id(powered).state && id(kettle_sync).state && id(kettle_valid) && !id(kettle_heating).state &&
                      id(kettle_on_base).state && !id(kettle_no_water);
           then:
             - logger.log: "Flair on -> kettle heats"
@@ -400,4 +485,5 @@ script:
                 id: kettle_cli
                 cmd: !lambda 'return "setsetting settempr " + to_string((int) lroundf(id(kettle_target).state * 1.8f + 32.0f));'
             - script.wait: kettle_cli
+            - lambda: "id(kettle_heat_by_us_ms) = millis(); id(kettle_off_by_us_ms) = 0;"
             - script.execute: {id: kettle_cli, cmd: "setstate S_Heat"}
