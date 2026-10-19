@@ -18,6 +18,12 @@
 # kettle with cold water. In the reference build's logs the tightest case was 74 s from Ready to the next pour;
 # 90 s was reported as too early once, hence 150 s.
 #
+# Pour cap (same switch): water poured while the Flair heats often never reaches Ready at all. The LED blinks at a
+# fixed rhythm while heating (~800/800 ms in the reference build) and does not change with the pour or the shot, so
+# the shot cannot be seen. Then the Flair goes off "Auto off pour cap" seconds (300) after the first hot kettle lift,
+# unless the reheat path is already counting down. Later lifts do not restart it. In the reference build's logs
+# (10 sessions) the first hot lift came 164-256 s before the session ended.
+#
 # Needs from the main config: binary_sensors `powered` / `heating` / `ready` / `real_button`,
 # script `power_off`, globals `esp_pressing` / `shot_off_ms` / `kettle_lift_count` / `kettle_hot_lift_ms`
 # (the last two are only ever set by the kettle package; without it the fallback never arms).
@@ -76,6 +82,19 @@ number:
     restore_value: true
     initial_value: 150         # Ready held this long after a pour before Ready -> off
 
+  - platform: template
+    name: Auto off pour cap
+    id: auto_off_pour_cap_delay
+    entity_category: config
+    unit_of_measurement: s
+    mode: box
+    min_value: 60
+    max_value: 1800
+    step: 10
+    optimistic: true
+    restore_value: true
+    initial_value: 300         # first hot kettle lift -> off at the latest
+
 binary_sensor:
   - platform: template
     id: any_press
@@ -109,6 +128,14 @@ binary_sensor:
       - lambda: "id(seen_lift_count) = id(kettle_lift_count); id(fallback_armed) = false;"
       - script.stop: auto_off_fallback_run
 
+  # First hot kettle lift since power-on (kettle_hot_lift_ms stays non-zero until the Flair goes off).
+  - platform: template
+    id: hot_lift_seen
+    internal: true
+    lambda: "return id(kettle_hot_lift_ms) != 0;"
+    on_press:
+      - script.execute: auto_off_pour_cap
+
   - platform: template
     id: reheat_edge
     internal: true
@@ -128,6 +155,7 @@ binary_sensor:
       - lambda: "id(was_ready) = false; id(kettle_hot_lift_ms) = 0; id(fallback_armed) = false;"
       - script.stop: auto_off_check
       - script.stop: auto_off_fallback_run
+      - script.stop: auto_off_pour_cap
 
 script:
   - id: auto_off_check
@@ -160,5 +188,23 @@ script:
             - homeassistant.event:
                 event: esphome.espresso_sync
                 data: {action: flair_off_fallback}
+            - lambda: "id(shot_off_ms) = millis() | 1;"   # the kettle package goes off and plays its jingle on this
+            - script.execute: power_off
+
+  - id: auto_off_pour_cap
+    mode: single
+    then:
+      - delay: !lambda "return (uint32_t) (id(auto_off_pour_cap_delay).state * 1000);"
+      - if:
+          condition:
+            # The reheat path, if counting, switches off on its own a few seconds later.
+            lambda: |-
+              return id(auto_off).state && id(auto_off_fallback).state && id(powered).state &&
+                     !id(auto_off_check).is_running();
+          then:
+            - logger.log: "First hot pour + pour cap, no shot seen -> Flair off"
+            - homeassistant.event:
+                event: esphome.espresso_sync
+                data: {action: flair_off_pour_cap}
             - lambda: "id(shot_off_ms) = millis() | 1;"   # the kettle package goes off and plays its jingle on this
             - script.execute: power_off

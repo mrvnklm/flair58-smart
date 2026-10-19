@@ -60,6 +60,7 @@ an "on". So:
 | **Auto off package** | | |
 | First reheat after Ready, not within 20 s of any press | `Auto off after` s later (25): Flair off | `Auto off after shot` (off) |
 | Hot kettle (≥ 85 °C) lifted ≤ 180 s before Ready, then no further lift and no reheat (needs the kettle package) | Ready held `Auto off fallback after` s (150) without a break: Flair off. Every new Ready restarts the count, any lift disarms it | `Auto off fallback` (off) |
+| First hot kettle lift (≥ 85 °C) while on, no shot seen (water poured while heating, Ready never came; needs the kettle package) | `Auto off pour cap` s (300) after that lift: Flair off, unless the reheat path is already counting. Later lifts do not restart it | `Auto off fallback` (off) |
 
 Typical timings (reference build): kettle on → Flair on 1.5–3.5 s · kettle off → Flair off 4–10 s ·
 short press → HIGH 1.65 s after release · ESP switches the Flair off → kettle off within ~1 s.
@@ -71,9 +72,9 @@ short press → HIGH 1.65 s after release · ESP switches the Flair off → kett
 | Controls | `Power`, `Preset`, `Power toggle`, `Next preset`, `Restart`; kettle: `Play kettle melody` |
 | State | `Powered`, `Heating`, `Ready`, `Status`, `Preset index`, `Button`, `LED 1–3`; kettle: `Kettle mode`, `Kettle heating`, `Kettle on base`, `Kettle temperature`, `Kettle reachable` |
 | Switches | see the behaviour table |
-| Config | `Long press`, `Short press`, `Press gap`; kettle: `Kettle IP`, `Kettle target`; auto off: `Auto off after`, `Auto off fallback after` |
+| Config | `Long press`, `Short press`, `Press gap`; kettle: `Kettle IP`, `Kettle target`; auto off: `Auto off after`, `Auto off fallback after`, `Auto off pour cap` |
 | Diagnostics | `LED n voltage`, `Button line (raw)`, `Wi-Fi signal`, `Blink gap max` (longest dark phase of a blinking LED since power-on; to size `blink_window_ms`, reference build: 800 ms) |
-| Events | `esphome.flair_button` (`type`: `short_press` / `long_press`, `machine`), `esphome.espresso_sync` (`action`), `esphome.flair_toggle_unconfirmed` (`wanted`) |
+| Events | `esphome.flair_button` (`type`: `short_press` / `long_press`, `machine`), `esphome.espresso_sync` (`action`), `esphome.flair_toggle_unconfirmed` (`wanted`), `esphome.flair_clicks` (`clicks`, `timing`, `machine`) |
 
 With `friendly_name: Flair 58`, entity IDs come out as `switch.flair_58_power`, `binary_sensor.flair_58_ready`,
 `sensor.flair_58_kettle_mode` and so on.

@@ -227,6 +227,22 @@ script:
 
   # Switch off with retries: toggle_verified may be busy (mode single drops the call) or the press
   # may not register. Used by every automatic off (safety, auto off, kettle off).
+  # Every counted click sequence to HA with its press and gap lengths, for tuning the click thresholds
+  # (a contact that bounces inside one press shows up as 2 clicks with a short gap).
+  - id: click_event
+    mode: queued
+    parameters:
+      n: int
+      timing: std::string
+      machine_on: bool
+    then:
+      - homeassistant.event:
+          event: esphome.flair_clicks
+          data:
+            clicks: !lambda "return to_string(n);"
+            timing: !lambda "return timing;"
+            machine: !lambda 'return machine_on ? "on" : "off";'
+
   - id: power_off
     mode: single
     then:
@@ -331,6 +347,7 @@ interval:
           const int n = button_clicks::take(250, timing);
           if (n == 0) return;
           ESP_LOGI("button", "%d click(s), Flair %s, ms: %s", n, id(powered).state ? "on" : "off", timing.c_str());
+          id(click_event).execute(n, timing, id(powered).state);
           // A real click wins over a running toggle: toggle_verified (mode single) would drop it while it waits for
           // the LEDs. The 3 s guard inside toggle_verified still prevents a second long press right after one.
           if (id(powered).state) {

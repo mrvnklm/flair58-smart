@@ -23,7 +23,7 @@ it does not touch the heater or the temperature sensor.
 | "Start on HIGH": the Flair always starts on LOW, the ESP steps it to HIGH (each press checked at the LEDs) | base |
 | One short press on the real button while off = switch on (the stock firmware ignores it); optionally one short press while on = switch off | base + button read |
 | Kettle on → Flair on; Flair on → kettle heats to a target; either off → both off | kettle package |
-| Auto off ~25 s after the shot (heuristic, opt-in), with a fallback for water poured before Ready | auto_off package (fallback: + kettle) |
+| Auto off ~25 s after the shot (heuristic, opt-in), with a fallback for water poured before Ready and a 300 s cap after the first pour | auto_off package (fallback: + kettle) |
 | Melodies on the kettle buzzer (double press, auto-off jingle) | kettle package |
 | "Espresso ready" notification when head and water are at temperature | Home Assistant examples |
 
@@ -203,7 +203,7 @@ computer is much faster than in the Home Assistant ESPHome add-on.
 | `Kettle sync` | on | the coupling (kettle package) |
 | `Melody on double press` | on | ≥ 2 clicks while off = melody on the kettle |
 | `Auto off after shot` | off | off ~25 s after the first reheat following Ready |
-| `Auto off fallback` | off | off 150 s after Ready when the water went in before Ready (needs the kettle package) |
+| `Auto off fallback` | off | off 150 s after Ready when the water went in before Ready, or 300 s after the first hot pour if no shot was seen (needs the kettle package) |
 | `Auto off jingle` | on | 1 s jingle on the kettle before auto off (needs both packages) |
 
 Behaviour table, entities, events, timings and the reasons behind the odd parts: [docs/firmware.md](docs/firmware.md).
